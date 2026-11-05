@@ -7,7 +7,7 @@ RUSTFLAGS='-C target-cpu=native' cargo build --locked --release --bin bench
 ./target/release/bench --list
 ./target/release/bench --threads 32 --mu 20..=30 --r 2,4,8 --c 2,4 \
   --fields goldilocks,m127 --backends qa,rs --repetitions 3 \
-  --memory-mode auto --max-estimated-gib 480 --output bench-results/results.csv
+  --memory-mode retained --max-estimated-gib 480 --output bench-results/results.csv
 ```
 
 Default CLI memory ceiling is a conservative **64 GiB**, not a claim that all
@@ -83,3 +83,35 @@ increase iterations). It measures commit/open/verify and wire serialization size
 work independently; timing scopes differ slightly from the sweep, and the fixed
 Criterion opening point differs from the sweep's random extension point. Preserve
 Criterion sample/estimates/benchmark JSONs, not only console confidence intervals.
+
+## Retained-only follow-up policy
+
+The formal follow-up measurements disable recomputation with `--memory-mode retained`.
+All completed cases from the earlier auto-policy traversal had `low_memory=false`;
+they can be reused with their original command/resource evidence and explicit import
+provenance. A new output directory preserves the original manifest rather than
+rewriting its policy. For example:
+
+```sh
+python3 scripts/run_sweep.py --binary target/release/bench \
+  --output-dir bench-results/retained-only --memory-mode retained \
+  --max-estimated-gib 480 --min-available-gib 12 --repetitions 3 \
+  --allow-memory-skips --reuse-completed-from /path/to/previous-sweep
+```
+
+`--reuse-completed-from` accepts only the same binary hash, repetitions, thread count
+and memory ceilings, and only completed retained-mode means/raw samples. Every reused
+case retains its old command and a `reuse.json` record. The runner rejects a retained
+sweep containing a low-memory measurement. It never falls back to recomputation.
+
+For M127, mu30/r2/c4, the late retained payload alone is approximately 592 GiB:
+16 GiB message + 128 GiB forward/inverse diagonals + 192 GiB top tree + 256 GiB
+intermediate trees. This excludes small allocations and other transient buffers;
+the guarded model with headroom is higher. On the original 503 GiB host this is
+an explicit memory exclusion under the retained-only policy. Goldilocks fitting
+at the same indices does not establish that this larger-element configuration fits.
+A larger-memory runner is needed for a comparable complete-retention measurement.
+
+`--allow-memory-skips` continues after such exclusions. `finished.json` distinguishes
+processed, measured, skipped-memory and raw-sample counts; an exclusion has blank
+timings and is never called a completed measurement.
