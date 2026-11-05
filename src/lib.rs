@@ -4,6 +4,7 @@ pub mod base_code;
 pub mod encoder;
 pub mod field_m127;
 pub mod matrix_h;
+pub mod mmcs;
 pub mod params;
 pub mod sampling;
 pub mod sumcheck;
