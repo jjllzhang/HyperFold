@@ -115,3 +115,23 @@ A larger-memory runner is needed for a comparable complete-retention measurement
 `--allow-memory-skips` continues after such exclusions. `finished.json` distinguishes
 processed, measured, skipped-memory and raw-sample counts; an exclusion has blank
 timings and is never called a completed measurement.
+
+## Actual attempts above the model ceiling
+
+An estimate-only exclusion can be followed by an actual retained attempt when that
+is the requested experiment contract. To avoid competing with the base traversal,
+`scripts/attempt_retained_extremes.py` queues the two explicit M127 mu30/r2/c4
+cases after the base sweep completes. It uses the same pinned binary, threads,
+seeds and repetitions with `--memory-mode retained`, raises only the estimate
+ceiling, and monitors actual host available memory every 0.1 seconds. The live
+12 GiB available-memory guard remains in force. A guard stop is an observed
+termination under that budget, not an operating-system OOM result or a proof that
+no other memory policy could succeed.
+
+The queue requires an explicit `actual-attempt-policy.json` with `enabled=true`
+and `memory_mode="retained"`; setting enabled false revokes pending work. Commands,
+partial raw samples, resource usage, memory traces and stop reasons are preserved
+under `actual-attempts/`. A stopped case has blank aggregate measurements. The
+original base table remains immutable; use `final-results.csv`,
+`final-results.raw.csv` and `final-finished.json` for the combined final outcomes.
+No recomputation fallback is permitted by this path.
