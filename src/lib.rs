@@ -6,3 +6,4 @@ pub mod field_m127;
 pub mod matrix_h;
 pub mod params;
 pub mod sampling;
+pub mod sumcheck;
