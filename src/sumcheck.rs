@@ -119,13 +119,13 @@ mod tests {
     fn eq_and_evaluation_match_naive() {
         let z: Vec<E> = (2..7).map(E::from_usize).collect();
         let table = eq_table(&z);
-        for j in 0..32 {
+        for (j, &actual) in table.iter().enumerate() {
             let expected: E = z
                 .iter()
                 .enumerate()
                 .map(|(s, &x)| if j >> s & 1 == 1 { x } else { E::ONE - x })
                 .product();
-            assert_eq!(table[j], expected);
+            assert_eq!(actual, expected);
         }
         let f: Vec<F> = (0..32).map(F::from_usize).collect();
         let expected: E = f.iter().zip(&table).map(|(&a, &b)| b * a).sum();

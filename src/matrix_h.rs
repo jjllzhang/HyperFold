@@ -154,7 +154,7 @@ mod tests {
     };
     use p3_field::extension::CubicTrinomialExtensionField;
     use p3_goldilocks::Goldilocks;
-    fn checks<F: SampleBase, T: Field + Algebra<F>>() {
+    fn checks<F: SampleBase, T: p3_field::ExtensionField<F>>() {
         for r in [2usize, 4, 8] {
             let h = LocalMatrix::<F>::new(r);
             let mut rng = stream(&[7; 32], b"matrix-test", 0);
@@ -163,10 +163,14 @@ mod tests {
                 .collect();
             let dinv: Vec<_> = d.iter().map(Field::inverse).collect();
             for _ in 0..10 {
-                let original: [T; 8] = core::array::from_fn(|_| T::from(F::sample(&mut rng)));
+                let original: [T; 8] = core::array::from_fn(|_| {
+                    <T as p3_field::BasedVectorSpace<F>>::from_basis_coefficients_fn(|_| {
+                        F::sample(&mut rng)
+                    })
+                });
                 let mut x = original;
                 h.forward(&mut x, &d);
-                for i in 0..r {
+                for (i, &actual) in x.iter().enumerate().take(r) {
                     let expect: T = (0..r)
                         .map(|j| {
                             original[j]
@@ -174,7 +178,7 @@ mod tests {
                                 * if j == 0 { F::ONE } else { d[j - 1] }
                         })
                         .sum();
-                    assert_eq!(x[i], expect);
+                    assert_eq!(actual, expect);
                 }
                 h.unscale_inverse(&mut x, &dinv);
                 assert_eq!(&x[..r], &original[..r]);

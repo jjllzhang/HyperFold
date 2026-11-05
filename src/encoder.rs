@@ -136,7 +136,7 @@ mod tests {
             .map(|q| m.values[(q % n) * r + q / n])
             .collect()
     }
-    fn check<F: SampleBase, E: Field + Algebra<F>>() {
+    fn check<F: SampleBase, E: p3_field::ExtensionField<F>>() {
         let mut rng = stream(&[1; 32], b"fold-test", 0);
         for r in [2usize, 4, 8] {
             for c in [2, 4] {
@@ -150,7 +150,11 @@ mod tests {
                     let msg: Vec<F> = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
                     let pi = encode_top(config, &base, &h, &diags, &msg, 2);
                     let alpha: Vec<E> = (0..config.nu())
-                        .map(|_| E::from(F::sample(&mut rng)))
+                        .map(|_| {
+                            <E as p3_field::BasedVectorSpace<F>>::from_basis_coefficients_fn(|_| {
+                                F::sample(&mut rng)
+                            })
+                        })
                         .collect();
                     let b = beta(&alpha);
                     let folded = fold_level(config, &h, &diags, &pi, 2, &b);
@@ -201,6 +205,24 @@ mod tests {
                         out
                     }
                     assert_eq!(logical(&pi, r), naive(config, &base, &h, &diags, &msg, 2));
+                    if r <= 4 {
+                        // Explicit G_d from the defining recursive map, not fast circuits.
+                        let mut generator = Vec::with_capacity(msg.len() * pi.values.len());
+                        let mut basis = vec![F::ZERO; msg.len()];
+                        for a in 0..msg.len() {
+                            basis[a] = F::ONE;
+                            generator.extend(naive(config, &base, &h, &diags, &basis, 2));
+                            basis[a] = F::ZERO;
+                        }
+                        let product: Vec<F> = (0..pi.values.len())
+                            .map(|j| {
+                                (0..msg.len())
+                                    .map(|a| msg[a] * generator[a * pi.values.len() + j])
+                                    .sum()
+                            })
+                            .collect();
+                        assert_eq!(logical(&pi, r), product);
+                    }
                 }
             }
         }

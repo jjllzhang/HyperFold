@@ -177,12 +177,19 @@ mod tests {
     use crate::field_m127::{M127Quad, Mersenne127};
     use p3_field::{PrimeCharacteristicRing, extension::CubicTrinomialExtensionField};
     use p3_goldilocks::Goldilocks;
-    fn check<F: SampleBase, T: Field + Algebra<F>>() {
+    fn check<F: SampleBase, T: p3_field::ExtensionField<F>>() {
         for kind in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
             for c in [2, 4] {
                 let config = HyperFoldConfig::testing(F::KIND, kind, 6, 3, 2, c, 3).unwrap();
                 let code = BaseCodeImpl::<F>::new(config, &[3; 32]).unwrap();
-                let msg: Vec<T> = (0..8).map(|i| T::from_usize(i * i + 7)).collect();
+                let mut rng = stream(&[61; 32], b"base-reference-test", c as u64);
+                let msg: Vec<T> = (0..8)
+                    .map(|_| {
+                        <T as p3_field::BasedVectorSpace<F>>::from_basis_coefficients_fn(|_| {
+                            F::sample(&mut rng)
+                        })
+                    })
+                    .collect();
                 let mut out = vec![T::ZERO; 8 * c];
                 code.encode_slice(&msg, &mut out);
                 match &code.encoder {
@@ -209,9 +216,9 @@ mod tests {
                         }
                     }
                     Encoder::Lagrange { .. } => {
-                        for y in 0..out.len() {
+                        for (y, &actual) in out.iter().enumerate() {
                             let mut naive = T::ZERO;
-                            for a in 0..8 {
+                            for (a, &message_value) in msg.iter().enumerate() {
                                 let basis: F = (0..8)
                                     .filter(|&i| i != a)
                                     .map(|i| {
@@ -219,9 +226,9 @@ mod tests {
                                             / (F::from_usize(a) - F::from_usize(i))
                                     })
                                     .product();
-                                naive += msg[a] * basis;
+                                naive += message_value * basis;
                             }
-                            assert_eq!(out[y], naive);
+                            assert_eq!(actual, naive);
                         }
                     }
                 }

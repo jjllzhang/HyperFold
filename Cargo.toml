@@ -26,3 +26,7 @@ criterion = "0.5.1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[[bench]]
+name = "pcs"
+harness = false

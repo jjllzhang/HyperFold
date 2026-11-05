@@ -151,3 +151,25 @@ fn parallel_matches_single_thread() {
     assert_eq!(one, run(4));
     assert_eq!(one, run(32));
 }
+
+#[test]
+fn immutable_statement_and_public_parameter_binding() {
+    type F = Goldilocks;
+    type E = CubicTrinomialExtensionField<F>;
+    let config = HyperFoldConfig::testing(F::KIND, BaseCodeKind::Rs, 8, 2, 4, 2, 3).unwrap();
+    let pcs = HyperFoldPcs::<F, E>::setup(config, [31; 32]).unwrap();
+    let mut rng = stream(&[3; 32], b"statement-test", 0);
+    let msg = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
+    let (cm, data) = pcs.commit(msg).unwrap();
+    let z = point::<F, E>(config.mu, &mut rng);
+    let y = evaluate(&data.message, &z);
+    let (p, _) = pcs.open(&cm, &data, &z, y).unwrap();
+    let wrong_setup = HyperFoldPcs::<F, E>::setup(config, [32; 32]).unwrap();
+    assert!(wrong_setup.verify(&cm, &z, y, &p).is_err());
+    let mut wrong_z = z.clone();
+    wrong_z[0] += E::ONE;
+    assert!(pcs.verify(&cm, &wrong_z, y, &p).is_err());
+    assert!(pcs.verify(&cm, &z[..z.len() - 1], y, &p).is_err());
+    let formal = HyperFoldConfig::experiment(F::KIND, BaseCodeKind::Rs, 20, 8, 2).unwrap();
+    assert!(HyperFoldPcs::<F, BinomialExtensionField<F, 2>>::setup(formal, [0; 32]).is_err());
+}
