@@ -2,7 +2,7 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{BaseCodeKind, HyperFoldConfig},
-    pcs::{HyperFoldPcs, Proof},
+    pcs::{HyperFoldPcs, OpenOptions, Proof},
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
 };
@@ -172,4 +172,80 @@ fn immutable_statement_and_public_parameter_binding() {
     assert!(pcs.verify(&cm, &z[..z.len() - 1], y, &p).is_err());
     let formal = HyperFoldConfig::experiment(F::KIND, BaseCodeKind::Rs, 20, 8, 2).unwrap();
     assert!(HyperFoldPcs::<F, BinomialExtensionField<F, 2>>::setup(formal, [0; 32]).is_err());
+}
+
+#[test]
+fn low_memory_matches_retained_bytes_and_transcript() {
+    fn check<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
+        let mut rng = stream(&[81; 32], b"memory-modes", 0);
+        for r in [2usize, 4, 8] {
+            for depth in [1, 2, 3, 4] {
+                for c in [2, 4] {
+                    for kind in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                        let cfg = HyperFoldConfig::testing(
+                            F::KIND,
+                            kind,
+                            2 + depth * r.ilog2() as usize,
+                            2,
+                            r,
+                            c,
+                            <E as BasedVectorSpace<F>>::DIMENSION,
+                        )
+                        .unwrap();
+                        let regular = HyperFoldPcs::<F, E>::setup(cfg, [41; 32]).unwrap();
+                        let mut low =
+                            HyperFoldPcs::<F, E>::setup_low_memory(cfg, [41; 32]).unwrap();
+                        assert_eq!(regular.id, low.id);
+                        let msg: Vec<F> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
+                        let (cm, data) = regular.commit(msg.clone()).unwrap();
+                        let (cm_low, data_low) = low.commit(msg).unwrap();
+                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm_low).unwrap());
+                        assert!(low.open(&cm_low, &data_low, &[], E::ZERO).is_err());
+                        low.prepare_open();
+                        assert!(
+                            low.diagonals
+                                .levels
+                                .iter()
+                                .all(|l| l.forward.capacity() == 0)
+                        );
+                        for _ in 0..2 {
+                            let z = point::<F, E>(cfg.mu, &mut rng);
+                            let y = evaluate(&data.message, &z);
+                            let (p, mut t) = regular.open(&cm, &data, &z, y).unwrap();
+                            let (q, mut u) = low
+                                .open_with_options(
+                                    &cm_low,
+                                    &data_low,
+                                    &z,
+                                    y,
+                                    OpenOptions {
+                                        recompute_first_tree: true,
+                                    },
+                                )
+                                .unwrap();
+                            assert_eq!(codec::encode(&p).unwrap(), codec::encode(&q).unwrap());
+                            let mut v = low.verify(&cm_low, &z, y, &q).unwrap();
+                            let a = t.sample::<F, E>(b"memory-agreement");
+                            assert_eq!(a, u.sample::<F, E>(b"memory-agreement"));
+                            assert_eq!(a, v.sample::<F, E>(b"memory-agreement"));
+                        }
+                        low.prepare_commit();
+                        assert!(
+                            low.diagonals
+                                .levels
+                                .iter()
+                                .all(|l| l.inverse.capacity() == 0)
+                        );
+                        for (a, b) in regular.diagonals.levels.iter().zip(&low.diagonals.levels) {
+                            assert_eq!(a.forward, b.forward);
+                        }
+                        let (cm2, _) = low.commit(data_low.message).unwrap();
+                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm2).unwrap());
+                    }
+                }
+            }
+        }
+    }
+    check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+    check::<Mersenne127, M127Quad>();
 }

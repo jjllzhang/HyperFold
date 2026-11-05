@@ -11,3 +11,5 @@ pub mod pcs;
 pub mod sampling;
 pub mod sumcheck;
 pub mod transcript;
+
+pub mod resources;

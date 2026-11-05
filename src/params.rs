@@ -143,6 +143,13 @@ pub struct DiagonalTables<F> {
 }
 impl<F: SampleBase> DiagonalTables<F> {
     pub fn new(config: HyperFoldConfig, seed: &[u8; 32]) -> Self {
+        Self::build(config, seed, false)
+    }
+    /// Explicit low-memory mode: commit direction only until prepare_open().
+    pub fn new_single(config: HyperFoldConfig, seed: &[u8; 32]) -> Self {
+        Self::build(config, seed, true)
+    }
+    fn build(config: HyperFoldConfig, seed: &[u8; 32], single: bool) -> Self {
         let levels = (1..=config.depth())
             .map(|i| {
                 let len = (config.r - 1) * config.n(i - 1);
@@ -156,11 +163,44 @@ impl<F: SampleBase> DiagonalTables<F> {
                             *x = nonzero(&mut rng);
                         }
                     });
-                let inverse = batch_multiplicative_inverse(&forward);
+                let inverse = if single {
+                    Vec::new()
+                } else {
+                    batch_multiplicative_inverse(&forward)
+                };
                 DiagonalLevel { forward, inverse }
             })
             .collect();
         Self { levels }
+    }
+    /// Reuse the same allocation; each worker needs only a bounded chunk scratch.
+    fn invert_in_place(values: &mut [F]) {
+        values.par_chunks_mut(4096).for_each(|chunk| {
+            let inverse = batch_multiplicative_inverse(chunk);
+            chunk.copy_from_slice(&inverse);
+        });
+    }
+    pub fn prepare_commit(&mut self) {
+        for level in &mut self.levels {
+            if level.forward.is_empty() {
+                level.forward = core::mem::take(&mut level.inverse);
+                Self::invert_in_place(&mut level.forward);
+            }
+        }
+    }
+    pub fn prepare_open(&mut self) {
+        for level in &mut self.levels {
+            if level.inverse.is_empty() {
+                level.inverse = core::mem::take(&mut level.forward);
+                Self::invert_in_place(&mut level.inverse);
+            }
+        }
+    }
+    pub fn has_forward(&self) -> bool {
+        self.levels.iter().all(|l| !l.forward.is_empty())
+    }
+    pub fn has_inverse(&self) -> bool {
+        self.levels.iter().all(|l| !l.inverse.is_empty())
     }
 }
 #[cfg(test)]

@@ -54,6 +54,11 @@ pub struct Proof<F, E> {
     pub top: Opening<F>,
     pub inner: Vec<CompressedOpening<E>>,
 }
+/// Explicit time/memory tradeoff. Rebuilding is included in open time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenOptions {
+    pub recompute_first_tree: bool,
+}
 #[derive(Debug)]
 pub struct HyperFoldPcs<F, E> {
     pub config: HyperFoldConfig,
@@ -65,6 +70,13 @@ pub struct HyperFoldPcs<F, E> {
 }
 impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E> {
     pub fn setup(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
+        Self::setup_mode(config, seed, false)
+    }
+    /// Store one diagonal direction; call prepare_open() after commit().
+    pub fn setup_low_memory(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
+        Self::setup_mode(config, seed, true)
+    }
+    fn setup_mode(config: HyperFoldConfig, seed: [u8; 32], single: bool) -> Result<Self> {
         config.validate()?;
         if config.base_field != F::KIND
             || config.extension_degree != <E as BasedVectorSpace<F>>::DIMENSION
@@ -79,7 +91,11 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let id = *hasher.finalize().as_bytes();
         let base = BaseCodeImpl::new(config, &seed)?;
         let h = LocalMatrix::new(config.r);
-        let diagonals = DiagonalTables::new(config, &seed);
+        let diagonals = if single {
+            DiagonalTables::new_single(config, &seed)
+        } else {
+            DiagonalTables::new(config, &seed)
+        };
         Ok(Self {
             config,
             id,
@@ -88,6 +104,14 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             diagonals,
             _extension: PhantomData,
         })
+    }
+    /// Setup conversion only; benchmark separately from commit/open.
+    pub fn prepare_commit(&mut self) {
+        self.diagonals.prepare_commit();
+    }
+    /// Setup conversion only; benchmark separately from commit/open.
+    pub fn prepare_open(&mut self) {
+        self.diagonals.prepare_open();
     }
     fn commit_prefix(&self, root: Digest) -> (Transcript, Vec<E>) {
         let mut t = Transcript::new(&self.id);
@@ -109,6 +133,9 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         Ok((t, z0, gamma))
     }
     pub fn commit(&self, message: Vec<F>) -> Result<(Commitment<E>, CommitData<F>)> {
+        if !self.diagonals.has_forward() {
+            return Err(Error::Config("call prepare_commit for forward diagonals"));
+        }
         if message.len() != self.config.k() {
             return Err(Error::Config("message length"));
         }
@@ -143,6 +170,19 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         z: &[E],
         y: E,
     ) -> Result<(Proof<F, E>, Transcript)> {
+        self.open_with_options(cm, data, z, y, OpenOptions::default())
+    }
+    pub fn open_with_options(
+        &self,
+        cm: &Commitment<E>,
+        data: &CommitData<F>,
+        z: &[E],
+        y: E,
+        options: OpenOptions,
+    ) -> Result<(Proof<F, E>, Transcript)> {
+        if !self.diagonals.has_inverse() {
+            return Err(Error::Config("call prepare_open for inverse diagonals"));
+        }
         if cm.root != data.root || data.message.len() != self.config.k() {
             return Err(Error::Proof("prover data mismatch"));
         }
@@ -151,10 +191,11 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let d = config.depth();
         let mut weights = sumcheck::combined_weights(&z0, z, gamma);
         let mut f = Vec::<E>::new();
-        let mut trees: Vec<Tree<E>> = Vec::with_capacity(d - 1);
+        let mut trees: Vec<Option<Tree<E>>> = Vec::with_capacity(d - 1);
         let mut rounds = Vec::with_capacity(d);
         let mut roots = Vec::with_capacity(d - 1);
         let mut running = cm.y0 + gamma * y;
+        let mut first_beta = None;
         for i in (1..=d).rev() {
             let stride = config.k0() * (1 << ((i - 1) * config.nu()));
             let mut level = Vec::with_capacity(config.nu());
@@ -182,20 +223,34 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 alphas.push(a);
             }
             rounds.push(level);
+            // truncate retains capacity; release it before accumulating another tree.
+            weights.shrink_to_fit();
+            f.shrink_to_fit();
             if i > 1 {
                 let b = beta(&alphas);
+                if i == d {
+                    first_beta = Some(b);
+                }
                 let next = if i == d {
                     let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 } else {
-                    let matrices =
-                        mmcs::mmcs::<E>().get_matrices(trees.last().expect("previous tree"));
+                    let matrices = mmcs::mmcs::<E>().get_matrices(
+                        trees
+                            .last()
+                            .and_then(Option::as_ref)
+                            .expect("previous tree"),
+                    );
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 };
+                if options.recompute_first_tree && trees.len() == 1 {
+                    // Its matrix was needed above; drop it before building the second tree.
+                    trees[0] = None;
+                }
                 let (root, tree) = mmcs::commit(next);
                 t.observe(b"folded-root", &root);
                 roots.push(root);
-                trees.push(tree);
+                trees.push(Some(tree));
             } else {
                 t.observe(b"final-table", &f);
             }
@@ -207,11 +262,11 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
         let top = mmcs::open(&data.tree, &top_indices);
-        let mut prev = top_indices;
-        let mut inner = Vec::with_capacity(d - 1);
-        for (pos, tree) in trees.iter().enumerate() {
+        let mut inner: Vec<Option<CompressedOpening<E>>> = (0..d - 1).map(|_| None).collect();
+        let compress = |pos: usize, tree: &Tree<E>| {
             let i = d - 1 - pos;
             let np = config.n(i - 1);
+            let prev = project(&queries, config.n(i));
             let indices = project(&queries, np);
             let o = mmcs::open(tree, &indices);
             let mut rows = o.rows;
@@ -222,12 +277,42 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                     .expect("projected query");
                 row.remove(p / np);
             }
-            inner.push(CompressedOpening {
+            CompressedOpening {
                 rows,
                 paths: o.paths,
-            });
-            prev = indices;
+            }
+        };
+        let mut rebuild = false;
+        // Consume retained trees first. Rebuilding earlier would recreate the original
+        // peak while all smaller trees were still live.
+        for (pos, tree) in trees.into_iter().enumerate() {
+            if let Some(tree) = tree {
+                inner[pos] = Some(compress(pos, &tree));
+            } else {
+                assert_eq!(pos, 0);
+                rebuild = true;
+            }
         }
+        if rebuild {
+            let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
+            let next = fold_level(
+                config,
+                &self.h,
+                &self.diagonals,
+                matrices[0],
+                d,
+                &first_beta.expect("first folding challenges"),
+            );
+            let (root, tree) = mmcs::commit(next);
+            if root != roots[0] {
+                return Err(Error::Proof("reconstructed tree root"));
+            }
+            inner[0] = Some(compress(0, &tree));
+        }
+        let inner = inner
+            .into_iter()
+            .map(|o| o.expect("opened intermediate tree"))
+            .collect();
         Ok((
             Proof {
                 rounds,
@@ -246,6 +331,9 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         y: E,
         proof: &Proof<F, E>,
     ) -> Result<Transcript> {
+        if !self.diagonals.has_inverse() {
+            return Err(Error::Config("call prepare_open for inverse diagonals"));
+        }
         let config = self.config;
         let d = config.depth();
         if proof.rounds.len() != d

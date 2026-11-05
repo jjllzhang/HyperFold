@@ -5,7 +5,8 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{self, BaseCodeKind, BaseFieldKind, HyperFoldConfig},
-    pcs::HyperFoldPcs,
+    pcs::{HyperFoldPcs, OpenOptions},
+    resources::estimated_gib,
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
 };
@@ -13,7 +14,7 @@ use p3_field::extension::CubicTrinomialExtensionField;
 use p3_field::{AlgebraIdentity, BasedVectorSpace, ExtensionField};
 use p3_goldilocks::Goldilocks;
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions as FileOptions},
     io::{BufWriter, Write},
     path::PathBuf,
     time::Instant,
@@ -50,6 +51,9 @@ struct Args {
     output: PathBuf,
     #[arg(long)]
     resume: bool,
+    /// auto selects low-memory only when retained storage exceeds the ceiling.
+    #[arg(long, default_value="auto", value_parser=["auto", "retained", "low"])]
+    memory_mode: String,
 }
 fn mus(input: &str) -> Result<Vec<usize>, String> {
     if let Some((a, b)) = input.split_once("..=") {
@@ -69,18 +73,9 @@ fn mus(input: &str) -> Result<Vec<usize>, String> {
             .collect()
     }
 }
-fn estimate(c: HyperFoldConfig) -> f64 {
-    let f = if c.base_field == BaseFieldKind::Goldilocks {
-        8.0
-    } else {
-        16.0
-    };
-    let e = f * c.extension_degree as f64;
-    let n = c.n(c.depth()) as f64;
-    let k = c.k() as f64;
-    let commit = 4.0 * f * n + f * k + 64.0 * n / c.r as f64;
-    let open = 3.0 * f * n + f * k + (e + 64.0) * n / (c.r - 1) as f64 + 2.0 * e * k;
-    1.15 * commit.max(open) / (1u64 << 30) as f64
+fn low_memory(c: HyperFoldConfig, args: &Args) -> bool {
+    args.memory_mode == "low"
+        || (args.memory_mode == "auto" && estimated_gib(c, false) > args.max_estimated_gib)
 }
 fn name(c: HyperFoldConfig) -> String {
     format!(
@@ -93,7 +88,7 @@ fn output(path: &PathBuf, resume: bool, header: &str) -> std::io::Result<BufWrit
         std::fs::create_dir_all(p)?;
     }
     let existing = resume && path.exists() && path.metadata()?.len() > 0;
-    let file = OpenOptions::new()
+    let file = FileOptions::new()
         .create(true)
         .write(true)
         .append(resume)
@@ -105,7 +100,7 @@ fn output(path: &PathBuf, resume: bool, header: &str) -> std::io::Result<BufWrit
     }
     Ok(w)
 }
-type Measurements = (f64, f64, f64, usize, usize);
+type Measurements = (f64, f64, f64, usize, usize, f64);
 type BenchError = Box<dyn std::error::Error + Send + Sync>;
 fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
     config: HyperFoldConfig,
@@ -113,9 +108,15 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
     raw: &mut impl Write,
 ) -> Result<Measurements, BenchError> {
     let setup_start = Instant::now();
-    let pcs = HyperFoldPcs::<F, E>::setup(config, [42; 32])?;
+    let low = low_memory(config, args);
+    let mut pcs = if low {
+        HyperFoldPcs::<F, E>::setup_low_memory(config, [42; 32])?
+    } else {
+        HyperFoldPcs::<F, E>::setup(config, [42; 32])?
+    };
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
     let mut sum = [0.0; 3];
+    let mut transition_sum = 0.0;
     let mut bytes = (0, 0);
     for repetition in 0..=args.repetitions {
         let mut rng = stream(&[27; 32], b"benchmark-message", config.mu as u64);
@@ -128,10 +129,24 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
             .collect();
         let y = evaluate(&message, &z);
         let start = Instant::now();
+        pcs.prepare_commit();
+        let commit_transition = start.elapsed();
+        let start = Instant::now();
         let (cm, data) = pcs.commit(message)?;
         let commit = start.elapsed().as_secs_f64() * 1000.0;
         let start = Instant::now();
-        let (proof, mut prover) = pcs.open(&cm, &data, &z, y)?;
+        pcs.prepare_open();
+        let transition_ms = (commit_transition + start.elapsed()).as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let (proof, mut prover) = pcs.open_with_options(
+            &cm,
+            &data,
+            &z,
+            y,
+            OpenOptions {
+                recompute_first_tree: low,
+            },
+        )?;
         let open = start.elapsed().as_secs_f64() * 1000.0;
         let start = Instant::now();
         let mut verifier = pcs.verify(&cm, &z, y, &proof)?;
@@ -147,19 +162,20 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
                 return Err("non-deterministic proof size".into());
             }
             bytes = sizes;
+            transition_sum += transition_ms;
             for (acc, v) in sum.iter_mut().zip([commit, open, verify]) {
                 *acc += v;
             }
             writeln!(
                 raw,
-                "{},{},{},{},{},{},{:.9},{commit:.6},{open:.6},{verify:.6},{},{},{setup_ms:.6}",
+                "{},{},{},{},{},{},{:.9},{commit:.6},{open:.6},{verify:.6},{},{},{setup_ms:.6},{low},{transition_ms:.6}",
                 name(config),
                 config.mu0,
                 config.extension_degree,
                 config.num_queries,
                 repetition,
                 config.certified,
-                estimate(config),
+                estimated_gib(config, low),
                 sizes.0,
                 sizes.1
             )?;
@@ -172,6 +188,7 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
         sum[2] / args.repetitions as f64,
         bytes.0,
         bytes.1,
+        transition_sum / args.repetitions as f64,
     ))
 }
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -228,16 +245,19 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
     if args.list {
-        println!("field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop");
+        println!(
+            "field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory"
+        );
         for c in cases {
             println!(
-                "{},{},{},{},{:.3},{}",
+                "{},{},{},{},{:.3},{},{}",
                 name(c),
                 c.mu0,
                 c.extension_degree,
                 c.num_queries,
-                estimate(c),
-                c.certified
+                estimated_gib(c, low_memory(c, &args)),
+                c.certified,
+                low_memory(c, &args)
             );
         }
         return Ok(());
@@ -261,12 +281,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut results = output(
         &args.output,
         args.resume,
-        "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope",
+        "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms",
     )?;
     let mut raw = output(
         &args.output.with_extension("raw.csv"),
         args.resume,
-        "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms",
+        "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms",
     )?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
@@ -275,11 +295,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if completed.contains(&name(config)) {
             continue;
         }
-        let gib = estimate(config);
+        let low = low_memory(config, &args);
+        let gib = estimated_gib(config, low);
         if gib > args.max_estimated_gib {
             writeln!(
                 results,
-                "{},skipped_memory,{},{},{},{},{},,,,,,,,{gib:.3},{}",
+                "{},skipped_memory,{},{},{},{},{},,,,,,,,{gib:.3},{},{low},",
                 name(config),
                 config.mu0,
                 config.extension_degree,
@@ -308,11 +329,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             BaseFieldKind::M127 => run::<Mersenne127, M127Quad>(config, &args, &mut raw),
         });
         match measured {
-            Ok((ct, ot, vt, cb, pb)) => {
+            Ok((ct, ot, vt, cb, pb, dt)) => {
                 let total = cb + pb;
                 writeln!(
                     results,
-                    "{},measured,{},{},{},{},{},{ct:.6},{ot:.6},{vt:.6},{cb},{pb},{total},{:.6},{gib:.3},{}",
+                    "{},measured,{},{},{},{},{},{ct:.6},{ot:.6},{vt:.6},{cb},{pb},{total},{:.6},{gib:.3},{},{low},{dt:.6}",
                     name(config),
                     config.mu0,
                     config.extension_degree,
@@ -357,6 +378,6 @@ mod tests {
         assert!(mus("20..=100").is_err());
         let c =
             HyperFoldConfig::experiment(BaseFieldKind::M127, BaseCodeKind::Rs, 30, 2, 4).unwrap();
-        assert!(estimate(c) > 500.0);
+        assert!(estimated_gib(c, false) > 500.0);
     }
 }
