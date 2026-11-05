@@ -6,9 +6,16 @@ use p3_goldilocks::Goldilocks;
 
 pub trait SampleBase: Field {
     const KIND: crate::params::BaseFieldKind;
+    fn fft_root(_log: usize) -> Option<Self> {
+        None
+    }
     fn sample(reader: &mut blake3::OutputReader) -> Self;
 }
 impl SampleBase for Goldilocks {
+    fn fft_root(log: usize) -> Option<Self> {
+        use p3_field::TwoAdicField;
+        (log <= 32).then(|| Self::two_adic_generator(log))
+    }
     const KIND: crate::params::BaseFieldKind = crate::params::BaseFieldKind::Goldilocks;
     fn sample(reader: &mut blake3::OutputReader) -> Self {
         loop {
