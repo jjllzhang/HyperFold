@@ -1,0 +1,296 @@
+//! Canonical scalar M127 arithmetic, with Plonky3's quadratic power basis X²+1.
+//! This implementation is not claimed constant-time. No SIMD representation is assumed.
+use core::{
+    fmt,
+    iter::{Product, Sum},
+    ops::*,
+};
+use num_bigint::BigUint;
+use p3_field::extension::{
+    Binomial, BinomialExtensionField, BinomiallyExtendable, ExtensionAlgebra,
+};
+use p3_field::integers::QuotientMap;
+use p3_field::{Field, Packable, PrimeCharacteristicRing, PrimeField, RawDataSerializable};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+pub const P: u128 = (1u128 << 127) - 1;
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct Mersenne127(u128);
+pub type M127Quad = BinomialExtensionField<Mersenne127, 2>;
+impl Mersenne127 {
+    pub const fn new(x: u128) -> Self {
+        let s = (x & P) + (x >> 127);
+        Self(if s >= P { s - P } else { s })
+    }
+    pub const fn canonical(self) -> u128 {
+        self.0
+    }
+    pub fn pow_u128(mut self, mut e: u128) -> Self {
+        let mut y = Self::ONE;
+        while e != 0 {
+            if e & 1 != 0 {
+                y *= self;
+            }
+            self *= self;
+            e >>= 1;
+        }
+        y
+    }
+}
+impl fmt::Display for Mersenne127 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl Serialize for Mersenne127 {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.to_le_bytes().serialize(s)
+    }
+}
+impl<'de> Deserialize<'de> for Mersenne127 {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let x = u128::from_le_bytes(<[u8; 16]>::deserialize(d)?);
+        if x >= P {
+            return Err(serde::de::Error::custom("noncanonical M127"));
+        }
+        Ok(Self(x))
+    }
+}
+impl Add for Mersenne127 {
+    type Output = Self;
+    #[inline]
+    fn add(self, b: Self) -> Self {
+        Self::new(self.0 + b.0)
+    }
+}
+impl Sub for Mersenne127 {
+    type Output = Self;
+    #[inline]
+    fn sub(self, b: Self) -> Self {
+        if self.0 >= b.0 {
+            Self(self.0 - b.0)
+        } else {
+            Self(P - (b.0 - self.0))
+        }
+    }
+}
+impl Neg for Mersenne127 {
+    type Output = Self;
+    #[inline]
+    fn neg(self) -> Self {
+        if self.0 == 0 { self } else { Self(P - self.0) }
+    }
+}
+impl Mul for Mersenne127 {
+    type Output = Self;
+    #[inline]
+    fn mul(self, b: Self) -> Self {
+        // Exact 128×128 ->256 via four 64-bit products, with explicit carries.
+        let mask = u64::MAX as u128;
+        let (a0, a1) = (self.0 & mask, self.0 >> 64);
+        let (b0, b1) = (b.0 & mask, b.0 >> 64);
+        let p00 = a0 * b0;
+        let p01 = a0 * b1;
+        let p10 = a1 * b0;
+        let p11 = a1 * b1;
+        let mid = (p00 >> 64) + (p01 & mask) + (p10 & mask);
+        let lo = (p00 & mask) | ((mid & mask) << 64);
+        let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+        // hi < 2^126, so the following 127-bit fold cannot overflow u128.
+        Self::new((lo & P) + ((hi << 1) | (lo >> 127)))
+    }
+}
+#[allow(clippy::suspicious_arithmetic_impl)]
+impl Div for Mersenne127 {
+    type Output = Self;
+    fn div(self, b: Self) -> Self {
+        self * b.inverse()
+    }
+}
+macro_rules! assign {($t:ident,$f:ident,$op:tt)=>{impl $t for Mersenne127 {#[inline] fn $f(&mut self,b:Self){*self=*self $op b;}}};}
+assign!(AddAssign,add_assign,+);
+assign!(SubAssign,sub_assign,-);
+assign!(MulAssign,mul_assign,*);
+assign!(DivAssign,div_assign,/);
+impl Sum for Mersenne127 {
+    fn sum<I: Iterator<Item = Self>>(i: I) -> Self {
+        i.fold(Self::ZERO, |a, b| a + b)
+    }
+}
+impl Product for Mersenne127 {
+    fn product<I: Iterator<Item = Self>>(i: I) -> Self {
+        i.fold(Self::ONE, |a, b| a * b)
+    }
+}
+impl PrimeCharacteristicRing for Mersenne127 {
+    type PrimeSubfield = Self;
+    const ZERO: Self = Self(0);
+    const ONE: Self = Self(1);
+    const TWO: Self = Self(2);
+    const NEG_ONE: Self = Self(P - 1);
+    fn from_prime_subfield(f: Self) -> Self {
+        f
+    }
+    #[inline]
+    fn halve(&self) -> Self {
+        Self((self.0 >> 1) | ((self.0 & 1) << 126))
+    }
+}
+impl Packable for Mersenne127 {}
+impl RawDataSerializable for Mersenne127 {
+    const NUM_BYTES: usize = 16;
+    fn into_bytes(self) -> impl IntoIterator<Item = u8> {
+        self.0.to_le_bytes()
+    }
+}
+impl Field for Mersenne127 {
+    type Packing = Self;
+    // Sage GF(2^127-1).multiplicative_generator(), order checked in tests.
+    const GENERATOR: Self = Self(43);
+    fn try_inverse(&self) -> Option<Self> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(self.pow_u128(P - 2))
+        }
+    }
+    fn order() -> BigUint {
+        BigUint::from(P)
+    }
+}
+macro_rules! unsigned {($($t:ty),*)=>{$(impl QuotientMap<$t> for Mersenne127 {
+    fn from_int(x:$t)->Self{Self::new(x as u128)}
+    fn from_canonical_checked(x:$t)->Option<Self>{((x as u128)<P).then_some(Self(x as u128))}
+    unsafe fn from_canonical_unchecked(x:$t)->Self{Self(x as u128)}
+})*};}
+unsigned!(u8, u16, u32, u64, u128);
+macro_rules! signed {($($t:ty),*)=>{$(impl QuotientMap<$t> for Mersenne127 {
+    fn from_int(x:$t)->Self{let x=x as i128;if x>=0{Self::new(x as u128)}else{-Self::new(x.unsigned_abs())}}
+    fn from_canonical_checked(x:$t)->Option<Self>{let x=x as i128;(x.unsigned_abs()<=P/2).then(||Self::from_int(x))}
+    unsafe fn from_canonical_unchecked(x:$t)->Self{Self::from_int(x)}
+})*};}
+signed!(i8, i16, i32, i64, i128);
+impl PrimeField for Mersenne127 {
+    fn as_canonical_biguint(&self) -> BigUint {
+        BigUint::from(self.0)
+    }
+}
+impl ExtensionAlgebra<Self, 2, Binomial<Self>> for Mersenne127 {
+    fn ext_mul(a: &[Self; 2], b: &[Self; 2], out: &mut [Self; 2]) {
+        let ac = a[0] * b[0];
+        let bd = a[1] * b[1];
+        out[0] = ac - bd;
+        out[1] = (a[0] + a[1]) * (b[0] + b[1]) - ac - bd;
+    }
+}
+impl BinomiallyExtendable<2> for Mersenne127 {
+    fn binomial_algebra_id() -> Vec<u8> {
+        b"hyperfold-m127-power-basis-v1:X^2+1".to_vec()
+    }
+    const W: Self = Self::NEG_ONE;
+    const DTH_ROOT: Self = Self::NEG_ONE;
+    // Sage GF(p^2,modulus=X^2+1).multiplicative_generator() = 8+i.
+    const EXT_GENERATOR: [Self; 2] = [Self(8), Self(1)];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_field::BasedVectorSpace;
+    fn next(s: &mut u128) -> u128 {
+        *s = s
+            .wrapping_mul(0xda942042e4dd58b5)
+            .wrapping_add(0x9e3779b97f4a7c15);
+        *s
+    }
+    #[test]
+    fn arithmetic_matches_biguint() {
+        let p = BigUint::from(P);
+        let mut s = 123;
+        let mut xs = vec![0, 1, 2, P - 1, P - 2, 1 << 64, (1 << 126) + 1, u128::MAX];
+        for _ in 0..1024 {
+            xs.push(next(&mut s));
+        }
+        for &a in &xs {
+            let b = next(&mut s);
+            let (x, y) = (Mersenne127::new(a), Mersenne127::new(b));
+            let (aa, bb) = (BigUint::from(a) % &p, BigUint::from(b) % &p);
+            assert_eq!((x * y).as_canonical_biguint(), (&aa * &bb) % &p);
+            assert_eq!((x + y).as_canonical_biguint(), (&aa + &bb) % &p);
+            assert_eq!((x - y).as_canonical_biguint(), (&aa + &p - &bb) % &p);
+            assert_eq!(x.halve().double(), x);
+            if !x.is_zero() {
+                assert_eq!(x * x.inverse(), Mersenne127::ONE);
+            }
+        }
+    }
+    #[test]
+    fn canonical_codec() {
+        for n in [0, 1, P - 1] {
+            let x = Mersenne127::new(n);
+            let b = postcard::to_allocvec(&x).unwrap();
+            assert_eq!(b, n.to_le_bytes());
+            assert_eq!(postcard::from_bytes::<Mersenne127>(&b).unwrap(), x);
+        }
+        assert!(postcard::from_bytes::<Mersenne127>(&P.to_le_bytes()).is_err());
+        assert!(postcard::from_bytes::<Mersenne127>(&u128::MAX.to_le_bytes()).is_err());
+    }
+    #[test]
+    fn extension_inverse_frobenius_and_generators() {
+        let factors = [
+            2u128,
+            3,
+            7,
+            19,
+            43,
+            73,
+            127,
+            337,
+            5419,
+            92737,
+            649657,
+            77158673929,
+        ];
+        for q in factors {
+            assert_ne!(
+                Mersenne127::GENERATOR.pow_u128((P - 1) / q),
+                Mersenne127::ONE
+            );
+        }
+        let generator = M127Quad::GENERATOR;
+        let order = BigUint::from(P) * BigUint::from(P) - BigUint::from(1u8);
+        fn pow(mut x: M127Quad, n: BigUint) -> M127Quad {
+            let mut a = M127Quad::ONE;
+            for b in n.to_bytes_le() {
+                for j in 0..8 {
+                    if b >> j & 1 == 1 {
+                        a *= x;
+                    }
+                    x = x.square();
+                }
+            }
+            a
+        }
+        for q in factors {
+            assert_ne!(pow(generator, &order / BigUint::from(q)), M127Quad::ONE);
+        }
+        let mut s = 17;
+        for _ in 0..64 {
+            let x = M127Quad::from_basis_coefficients_fn(|_| Mersenne127::new(next(&mut s)));
+            if !x.is_zero() {
+                assert_eq!(x * x.inverse(), M127Quad::ONE);
+            }
+            assert_eq!(
+                pow(x, BigUint::from(P)),
+                M127Quad::new([
+                    <M127Quad as BasedVectorSpace<Mersenne127>>::as_basis_coefficients_slice(&x)[0],
+                    -<M127Quad as BasedVectorSpace<Mersenne127>>::as_basis_coefficients_slice(&x)
+                        [1]
+                ])
+            );
+        }
+        let bytes = postcard::to_allocvec(&generator).unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+}
