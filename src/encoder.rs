@@ -26,14 +26,14 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     if depth == 0 {
         return RowMajorMatrix::new(buf, 1);
     }
-    let mut next = vec![T::ZERO; buf.len()];
     for i in 1..=depth {
         let np = config.n(i - 1);
         let ni = config.r * np;
         let diag = &diags.levels[i - 1].forward;
         if i == depth {
-            // One group at top: write directly in Merkle bundle order.
-            next.par_chunks_exact_mut(config.r)
+            // Only the final layout change needs a second full-size output.
+            let mut out = vec![T::ZERO; buf.len()];
+            out.par_chunks_exact_mut(config.r)
                 .enumerate()
                 .for_each(|(j, row)| {
                     let mut x = [T::ZERO; 8];
@@ -43,26 +43,56 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
                     h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
                     row.copy_from_slice(&x[..config.r]);
                 });
-        } else {
-            // Natural-order intermediate subtree groups, parallelized in disjoint blocks.
-            next.par_chunks_exact_mut(ni)
-                .zip(buf.par_chunks_exact(ni))
-                .for_each(|(out, input)| {
-                    for j in 0..np {
-                        let mut x = [T::ZERO; 8];
-                        for a in 0..config.r {
-                            x[a] = input[a * np + j];
-                        }
-                        h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
-                        for a in 0..config.r {
-                            out[a * np + j] = x[a];
-                        }
-                    }
-                });
+            return RowMajorMatrix::new(out, config.r);
         }
-        core::mem::swap(&mut buf, &mut next);
+        buf.par_chunks_exact_mut(ni).for_each(|group| {
+            let mut lanes: [&mut [T]; 8] = core::array::from_fn(|_| -> &mut [T] { &mut [] });
+            let mut remaining = group;
+            for lane in lanes.iter_mut().take(config.r) {
+                let (head, tail) = remaining.split_at_mut(np);
+                *lane = head;
+                remaining = tail;
+            }
+            butterfly_group(lanes, config.r, diag, h);
+        });
     }
     RowMajorMatrix::new(buf, config.r)
+}
+// Each recursion owns disjoint coordinate intervals in every lane. No heap scratch
+// and no unsafe aliasing are needed; even a single large subtree exposes many tasks.
+fn butterfly_group<F: Field, T: Field + Algebra<F>>(
+    lanes: [&mut [T]; 8],
+    r: usize,
+    diag: &[F],
+    h: &LocalMatrix<F>,
+) {
+    let n = lanes[0].len();
+    if n > 4096 {
+        let mid = n / 2;
+        let mut left: [&mut [T]; 8] = core::array::from_fn(|_| -> &mut [T] { &mut [] });
+        let mut right: [&mut [T]; 8] = core::array::from_fn(|_| -> &mut [T] { &mut [] });
+        for (a, lane) in lanes.into_iter().enumerate().take(r) {
+            let (lo, hi) = lane.split_at_mut(mid);
+            left[a] = lo;
+            right[a] = hi;
+        }
+        let (dl, dr) = diag.split_at(mid * (r - 1));
+        rayon::join(
+            || butterfly_group(left, r, dl, h),
+            || butterfly_group(right, r, dr, h),
+        );
+    } else {
+        for j in 0..n {
+            let mut x = [T::ZERO; 8];
+            for a in 0..r {
+                x[a] = lanes[a][j];
+            }
+            h.forward(&mut x, &diag[j * (r - 1)..(j + 1) * (r - 1)]);
+            for a in 0..r {
+                lanes[a][j] = x[a];
+            }
+        }
+    }
 }
 pub fn beta<E: Field>(alpha: &[E]) -> [E; 8] {
     let r = 1 << alpha.len();
@@ -226,6 +256,53 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn parallel_in_place_butterfly_matches_scalar() {
+        fn check_large<F: SampleBase, E: p3_field::ExtensionField<F>>() {
+            let mut rng = stream(&[63; 32], b"large-butterfly", 0);
+            for r in [2, 4, 8] {
+                let n = 8193;
+                let h = LocalMatrix::<F>::new(r);
+                let diag: Vec<F> = (0..n * (r - 1)).map(|_| F::sample(&mut rng)).collect();
+                let original: Vec<E> = (0..n * r)
+                    .map(|_| {
+                        <E as p3_field::BasedVectorSpace<F>>::from_basis_coefficients_fn(|_| {
+                            F::sample(&mut rng)
+                        })
+                    })
+                    .collect();
+                let mut expected = original.clone();
+                for j in 0..n {
+                    let mut x = [E::ZERO; 8];
+                    for a in 0..r {
+                        x[a] = original[a * n + j];
+                    }
+                    h.forward(&mut x, &diag[j * (r - 1)..(j + 1) * (r - 1)]);
+                    for a in 0..r {
+                        expected[a * n + j] = x[a];
+                    }
+                }
+                for threads in [1, 4, 32] {
+                    let mut actual = original.clone();
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap()
+                        .install(|| {
+                            let mut lanes: [&mut [E]; 8] =
+                                core::array::from_fn(|_| -> &mut [E] { &mut [] });
+                            for (lane, chunk) in lanes.iter_mut().zip(actual.chunks_exact_mut(n)) {
+                                *lane = chunk;
+                            }
+                            butterfly_group(lanes, r, &diag, &h);
+                        });
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        check_large::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check_large::<Mersenne127, M127Quad>();
     }
     #[test]
     fn encoder_and_fold_match_naive() {

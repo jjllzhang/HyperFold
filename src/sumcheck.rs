@@ -55,32 +55,72 @@ pub fn round_values<T: Field, E: Field + Algebra<T>>(f: &[T], w: &[E], stride: u
     f.par_chunks_exact(2 * stride)
         .zip(w.par_chunks_exact(2 * stride))
         .map(|(f, w)| {
-            let mut g = [E::ZERO; 3];
-            for j in 0..stride {
-                let (f0, f1) = (f[j], f[stride + j]);
-                let (w0, w1) = (w[j], w[stride + j]);
-                g[0] += w0 * f0;
-                g[1] += w1 * f1;
-                g[2] += (w1.double() - w0) * (f1.double() - f0);
-            }
-            g
+            let (f0, f1) = f.split_at(stride);
+            let (w0, w1) = w.split_at(stride);
+            f0.par_chunks(4096)
+                .zip(f1.par_chunks(4096))
+                .zip(w0.par_chunks(4096))
+                .zip(w1.par_chunks(4096))
+                .map(|(((a, b), c), d)| {
+                    let mut g = [E::ZERO; 3];
+                    for j in 0..a.len() {
+                        g[0] += c[j] * a[j];
+                        g[1] += d[j] * b[j];
+                        g[2] += (d[j].double() - c[j]) * (b[j].double() - a[j]);
+                    }
+                    g
+                })
+                .reduce(
+                    || [E::ZERO; 3],
+                    |a, b| core::array::from_fn(|i| a[i] + b[i]),
+                )
         })
         .reduce(
             || [E::ZERO; 3],
             |a, b| core::array::from_fn(|i| a[i] + b[i]),
         )
 }
+/// Allocate only when lifting the first base-field message to E (and in references).
 pub fn fold_table<T: Field, E: Field + Algebra<T>>(f: &[T], stride: usize, alpha: E) -> Vec<E> {
     assert!(f.len().is_multiple_of(2 * stride));
     let mut out = vec![E::ZERO; f.len() / 2];
+    let one_minus = E::ONE - alpha;
     out.par_chunks_exact_mut(stride)
         .zip(f.par_chunks_exact(2 * stride))
         .for_each(|(dst, src)| {
-            for j in 0..stride {
-                dst[j] = (E::ONE - alpha) * src[j] + alpha * src[stride + j];
-            }
+            let (lo, hi) = src.split_at(stride);
+            dst.par_chunks_mut(4096)
+                .zip(lo.par_chunks(4096))
+                .zip(hi.par_chunks(4096))
+                .for_each(|((dst, a), b)| {
+                    for j in 0..dst.len() {
+                        dst[j] = one_minus * a[j] + alpha * b[j];
+                    }
+                });
         });
     out
+}
+/// Fold in disjoint even/odd block pairs, then compact the computed even blocks.
+/// The phase barrier is necessary: parallel writes directly to the compacted prefix
+/// could otherwise overwrite another worker's source. truncate retains capacity.
+pub fn fold_table_in_place<E: Field>(f: &mut Vec<E>, stride: usize, alpha: E) {
+    assert!(f.len().is_multiple_of(2 * stride));
+    let one_minus = E::ONE - alpha;
+    f.par_chunks_exact_mut(2 * stride).for_each(|pair| {
+        let (lo, hi) = pair.split_at_mut(stride);
+        lo.par_chunks_mut(4096)
+            .zip(hi.par_chunks(4096))
+            .for_each(|(a, b)| {
+                for j in 0..a.len() {
+                    a[j] = one_minus * a[j] + alpha * b[j];
+                }
+            });
+    });
+    let new_len = f.len() / 2;
+    for block in 1..new_len / stride {
+        f.copy_within(2 * block * stride..(2 * block + 1) * stride, block * stride);
+    }
+    f.truncate(new_len);
 }
 pub fn eval_round<E: Field>(g: [E; 3], x: E) -> E {
     let c2 = (g[2] - g[1].double() + g[0]).halve();
@@ -134,6 +174,54 @@ mod tests {
             combined_weights(&z, &z, E::TWO),
             table.iter().map(|&x| x * E::from_u8(3)).collect::<Vec<_>>()
         );
+    }
+    #[test]
+    fn parallel_strided_in_place_matches_reference() {
+        use crate::sampling::{SampleBase, stream};
+        use p3_field::BasedVectorSpace;
+        let mut rng = stream(&[61; 32], b"large-strided-fold", 0);
+        let alpha = E::from_basis_coefficients_fn(|_| F::sample(&mut rng));
+        for stride in [1, 17, 8193] {
+            for pairs in [1, 2, 4] {
+                let f: Vec<E> = (0..2 * stride * pairs)
+                    .map(|_| E::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                    .collect();
+                let w: Vec<E> = (0..f.len())
+                    .map(|_| E::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                    .collect();
+                let expected: Vec<E> = f
+                    .chunks_exact(2 * stride)
+                    .flat_map(|p| {
+                        (0..stride).map(move |j| (E::ONE - alpha) * p[j] + alpha * p[stride + j])
+                    })
+                    .collect();
+                let mut g = [E::ZERO; 3];
+                for (fp, wp) in f.chunks_exact(2 * stride).zip(w.chunks_exact(2 * stride)) {
+                    for j in 0..stride {
+                        for (t, v) in g.iter_mut().enumerate() {
+                            let t = E::from_usize(t);
+                            *v += ((E::ONE - t) * fp[j] + t * fp[stride + j])
+                                * ((E::ONE - t) * wp[j] + t * wp[stride + j]);
+                        }
+                    }
+                }
+                for threads in [1, 4, 32] {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap()
+                        .install(|| {
+                            assert_eq!(round_values(&f, &w, stride), g);
+                            assert_eq!(fold_table(&f, stride, alpha), expected);
+                            let mut actual = f.clone();
+                            let capacity = actual.capacity();
+                            fold_table_in_place(&mut actual, stride, alpha);
+                            assert_eq!(actual, expected);
+                            assert_eq!(actual.capacity(), capacity);
+                        });
+                }
+            }
+        }
     }
     #[test]
     fn sumcheck_matches_naive_hypercube_and_beta() {

@@ -172,12 +172,12 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 t.observe(b"sumcheck-round", &g);
                 let a = t.sample::<F, E>(b"sumcheck-alpha");
                 running = sumcheck::eval_round(g, a);
-                f = if first {
-                    sumcheck::fold_table(&data.message, stride, a)
+                if first {
+                    f = sumcheck::fold_table(&data.message, stride, a);
                 } else {
-                    sumcheck::fold_table(&f, stride, a)
-                };
-                weights = sumcheck::fold_table(&weights, stride, a);
+                    sumcheck::fold_table_in_place(&mut f, stride, a);
+                }
+                sumcheck::fold_table_in_place(&mut weights, stride, a);
                 level.push(g);
                 alphas.push(a);
             }
@@ -200,6 +200,10 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 t.observe(b"final-table", &f);
             }
         }
+        // Truncation above deliberately reuses allocations; now release their unused
+        // capacity before retaining the clear terminal table or opening the trees.
+        drop(weights);
+        f.shrink_to_fit();
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
         let top = mmcs::open(&data.tree, &top_indices);
