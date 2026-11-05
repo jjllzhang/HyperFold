@@ -38,11 +38,11 @@ impl<T: Field> CryptographicHasher<T, Digest> for LeafHash {
 pub struct NodeHash;
 impl PseudoCompressionFunction<Digest, 2> for NodeHash {
     fn compress(&self, input: [Digest; 2]) -> Digest {
-        let mut h = blake3::Hasher::new();
-        h.update(&[1]);
-        h.update(&input[0]);
-        h.update(&input[1]);
-        *h.finalize().as_bytes()
+        let mut bytes = [0u8; 65];
+        bytes[0] = 1;
+        bytes[1..33].copy_from_slice(&input[0]);
+        bytes[33..65].copy_from_slice(&input[1]);
+        *blake3::hash(&bytes).as_bytes()
     }
 }
 pub type CanonicalMmcs<T> = MerkleTreeMmcs<T, u8, LeafHash, NodeHash, 2, 32>;
@@ -141,6 +141,14 @@ mod tests {
     }
     #[test]
     fn canonical_and_domains() {
+        let mut reference = blake3::Hasher::new();
+        reference.update(&[1]);
+        reference.update(&[7; 32]);
+        reference.update(&[13; 32]);
+        assert_eq!(
+            NodeHash.compress([[7; 32], [13; 32]]),
+            *reference.finalize().as_bytes()
+        );
         let x = F::from_u8(5);
         let a = LeafHash.hash_iter([x, x]);
         assert_ne!(a, NodeHash.compress([a, a]));
