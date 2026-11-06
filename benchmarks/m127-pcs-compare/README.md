@@ -26,3 +26,13 @@ Correctness tests include random and carry boundaries, inverse/Frobenius, canoni
 The driver always uses the proven one-shot lifecycle: fresh Setup, input/claimed evaluation, commit, drop forward diagonals, consume witness after the first lifted Sumcheck subround, keep first-tree hashes and recover queried rows, verify/serialize, then destroy the caller-owned oracle. Setup, release, serialization, diagnostics, final cleanup and full wall are reported separately; online total includes commit+forward release+open+verify. Open includes witness release and first-tree query work. Proof size includes commitment+evaluation proof. CSV IO is outside per-trial wall. Peak RSS covers the whole process including Setup and warmup.
 
 The current authorized experiment is four representative points (mu20/26,r2c4,QA/RS), three independent rounds with backend order ABC/BCA/CAB, one warmup plus three measured trials per process: 36 processes,108 formal trials. This does not change the production backend or overwrite any historical result. Tests and comparisons are not security proofs.
+
+After freezing the verified native binary and clean source commit, run the controller in a new directory:
+
+```sh
+python3 benchmarks/m127-pcs-compare/run.py --binary benchmarks/m127-pcs-compare/target-native/release/hyperfold-m127-pcs-compare --root /absolute/new/data
+python3 benchmarks/m127-pcs-compare/analyze.py --root /absolute/new/data --output /absolute/new/report
+python3 benchmarks/m127-pcs-compare/analyze.py --archive /absolute/new/report/raw-evidence.tar.gz --output /absolute/new/rebuilt
+```
+
+Compare the four numeric CSV files in report/rebuilt byte-for-byte. A functional controller smoke explicitly uses `--smoke --mus 20 --rounds 1 --repetitions 1` in a separate directory; its samples are not the formal comparison. Existing data/output paths are rejected, and any failed process preserves evidence and stops the sweep without fallback or partial-result means.
