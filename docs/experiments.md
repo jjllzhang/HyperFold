@@ -273,3 +273,9 @@ retain all partial CSVs and real exit/resource records; aggregate timing/size fi
 remain blank unless all three repetitions complete. `runtime_failed` does not
 imply a kernel-confirmed per-process OOM. Query recovery is labeled separately from
 native retention and prior whole-tree rebuilding results.
+
+The completed [μ30 recovered-mode actual-attempt report](../experiments/mu30-recovered-2026-11-06/REPORT.md)
+records two real exits137/signal9 and zero complete formal samples, with all
+incomplete timing/size fields blank. Its archive-only helper separately validates
+strategy, guard policy, real resources and blank outcomes without mixing the
+original retained-mode data.

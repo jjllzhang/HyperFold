@@ -1,0 +1,7 @@
+{
+  "first_tree_strategy": "prehashed_recovered",
+  "diagonal_storage": "retained_both",
+  "memory_guard_enabled": false,
+  "directive": "ac83bfb5-eeb2-4070-9356-e45ec2884dac",
+  "enabled": true
+}

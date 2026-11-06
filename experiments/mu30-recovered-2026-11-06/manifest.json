@@ -1,0 +1,22 @@
+{
+  "started_utc": "2026-11-06T07:57:09.875087+00:00",
+  "binary_sha256": "91f4e7d6718c56510d62406fd888c54df87b9c46b02fa6dfa247cb916e3b5857",
+  "mu": 30,
+  "source_commit": "4f13ffd6e1383ed5b7a8b1bd0693caed70c30e0c",
+  "source_status": "",
+  "repetitions": 3,
+  "warmup": 1,
+  "threads": 32,
+  "setup_per_process": 1,
+  "fresh_commit_every_repetition": true,
+  "first_tree_strategy": "prehashed_recovered",
+  "diagonal_storage": "retained_both",
+  "memory_guard_enabled": false,
+  "whole_tree_rebuild": false,
+  "estimate_exclusions": false,
+  "directive": "ac83bfb5-eeb2-4070-9356-e45ec2884dac",
+  "setup_seed_byte": 42,
+  "message_seed_byte": 27,
+  "point_seed_byte": 28,
+  "scope": "separate actual attempts; original 142 configurations and all prior failures immutable"
+}

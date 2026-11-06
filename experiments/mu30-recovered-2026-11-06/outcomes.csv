@@ -1,0 +1,3 @@
+field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory,first_tree_strategy,diagonal_storage,fingerprint,status,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,diagonal_transition_ms,exit_code,memory_guard_enabled,recorded_raw_samples,observed_peak_hwm_kib,minimum_host_available_bytes,global_oom_kill_delta
+M127,Qa,30,2,4,6,2,261,,true,false,prehashed_recovered,retained_both,,runtime_failed,32,3,,,,,,,,,137,False,0,521546040,0,1
+M127,Rs,30,2,4,6,2,223,,true,false,prehashed_recovered,retained_both,,runtime_failed,32,3,,,,,,,,,137,False,0,522059708,0,1

@@ -28,12 +28,19 @@ See [protocol mapping](docs/protocol.md), [test coverage](docs/testing.md), and
 
 ## Retained benchmark results
 
-The latest [unguarded follow-up report](experiments/retained-unguarded-2026-11-06/REPORT.md)
+The [native-retained unguarded follow-up report](experiments/retained-unguarded-2026-11-06/REPORT.md)
 contains 142 complete cases (426 repetitions) and two actual process failures after
 memory termination was disabled. Both extreme cases exited 137 with signal 9;
 all incomplete timing and proof-size measurements are blank. Real memory traces,
 exit records, global OOM-counter observations and portable analysis are included.
 No recomputation was used, and the 142 previously measured cases are unchanged.
+
+The subsequent [μ=30 queried-row attempts](experiments/mu30-recovered-2026-11-06/REPORT.md)
+actually ran the two largest M127/r=2/c=4 cases with retained two-direction Setup
+and all active memory guards disabled. Both exited 137 / signal 9, at observed
+peaks of 497.416 / 497.934 GiB; no formal measurements completed. Thus this
+strategy alone did not finish those cases on this host. Its incomplete metrics
+stay blank and the original baseline is unchanged.
 
 The [queried-row recovery comparison](experiments/query-rows-2026-11-06/REPORT.md)
 completed 18 processes / 54 measured openings at M127 μ=26, r=2, c=4. Relative to

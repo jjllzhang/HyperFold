@@ -1,0 +1,3 @@
+field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory,first_tree_strategy,diagonal_storage,fingerprint
+M127,Qa,30,2,4,6,2,261,,true,false,prehashed_recovered,retained_both,
+M127,Rs,30,2,4,6,2,223,,true,false,prehashed_recovered,retained_both,

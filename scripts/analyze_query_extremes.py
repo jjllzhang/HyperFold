@@ -96,7 +96,12 @@ def main():
                               global_oom_kill_delta=delta,
                               swapin_pages_delta=status['system_after']['vmstat']['pswpin']-status['system_before']['vmstat']['pswpin'],
                               swapout_pages_delta=status['system_after']['vmstat']['pswpout']-status['system_before']['vmstat']['pswpout']))
-    assert complete == rows(root / 'completed-raw.csv')
+    complete_path = root / 'completed-raw.csv'
+    # write_table intentionally emits no file when no case completed any samples.
+    if complete_path.exists():
+        assert complete == rows(complete_path)
+    else:
+        assert complete == [] and finished['complete_raw_samples'] == 0
     assert finished['processed'] == 2 and finished['complete_raw_samples'] == len(complete)
     assert finished['measured'] == sum(r['status'] == 'measured' for r in outcomes)
     assert finished['runtime_failed'] == sum(r['status'] == 'runtime_failed' for r in outcomes)
@@ -132,7 +137,7 @@ def main():
     for outcome, r in zip(outcomes, resources):
         report += f"| {r['backend'].upper()} | {outcome['status']} | {r['exit_code']} | {r['termination_signal']} | {r['gnu_peak_rss_gib']} | {r['minimum_available_gib']} | {r['global_oom_kill_delta']} |\n"
     report += '''
-Each process prepares Setup once, then performs one warmup and three measured repetitions, with a fresh commitment in each repetition. Setup/input generation/claimed-value evaluation are outside commit/open/verify timers. Opening includes prehashing, codeword release, query-row recovery and native multiproof work. Both diagonal directions remain live; no forward-table release or whole-tree rebuilding is used. Proof size counts encoded commitment plus evaluation proof. Only complete verified repetitions with matching prover/verifier post-challenges and deterministic fingerprints enter raw records. Aggregate timing and size fields remain blank for every incomplete case, even if a partial measurement exists.
+Each process is scheduled to prepare Setup once, then attempt one warmup and three measured repetitions, with a fresh commitment in each repetition. The counts above describe actual completions, not planned repetitions. Setup/input generation/claimed-value evaluation are outside commit/open/verify timers. Opening includes prehashing, codeword release, query-row recovery and native multiproof work. Both diagonal directions remain live; no forward-table release or whole-tree rebuilding is used. Proof size counts encoded commitment plus evaluation proof. Only complete verified repetitions with matching prover/verifier post-challenges and deterministic fingerprints enter raw records. Aggregate timing and size fields remain blank for every incomplete case, even if a partial measurement exists.
 
 The processes were actually launched under a pinned binary and immutable execution contracts; no system swap/cgroup/kernel settings were changed. RSS spans the entire process, including Setup/warmup. Exit code and GNU time signal are reported independently. SIGKILL plus a global OOM-counter increase does not establish kernel-confirmed attribution to a particular PID. Memory traces and swap-counter changes are preserved; the old 498 GiB retained-path stop was a partial observation, not a full-peak baseline.
 

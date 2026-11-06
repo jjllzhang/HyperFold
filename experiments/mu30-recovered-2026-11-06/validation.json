@@ -1,0 +1,12 @@
+{
+  "actual_attempts": 2,
+  "runtime_failed": 2,
+  "complete_measured_samples": 0,
+  "all_incomplete_metrics_blank": true,
+  "strategy_and_double_setup_verified": true,
+  "no_active_memory_guard": true,
+  "actual_commands_contracts_exit_signals_resources_checked": true,
+  "binary_sha256_checked": true,
+  "archive_only_three_numeric_csvs_byte_identical": true,
+  "empty_completed_raw_file_absent_by_write_table_design": true
+}
