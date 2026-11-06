@@ -279,3 +279,45 @@ records two real exits137/signal9 and zero complete formal samples, with all
 incomplete timing/size fields blank. Its archive-only helper separately validates
 strategy, guard policy, real resources and blank outcomes without mixing the
 original retained-mode data.
+
+## Opening-only parameters and consumed message witnesses
+
+The plan is `/home/zjl/zkp-research/notes/impl-plan-hyperfold-one-shot-lifetimes.md`.
+After the final `commit`, `into_opening_only()` drops forward diagonal allocations
+and returns `OpeningOnlyPcs`, which has no commit or prepare_commit API. Inverses,
+base-code parameters, matrix and parameter ID remain unchanged. `CommitData::into_parts()`
+moves its top tree and witness into `CommittedOracle` / `OwnedWitness`; it clones no
+large arrays. `open_once` consumes only the witness, freeing it immediately after
+its first complete lifted fold. The caller keeps the oracle through verification
+and serialization. Original borrowed APIs continue supporting repeated opens.
+
+`examples/one_shot_lifetimes.rs` controls the complete outer lifecycle: both
+`--mode retained` and `--mode release` construct fresh Setup for every trial,
+including warmup. They both use prehashed queried-row recovery. Release mode
+additionally drops forward storage and consumes the witness. The retained control
+keeps both Setup directions and the original witness through the same outer
+cleanup point. Each process has one warmup and three measured trials.
+
+```sh
+RUSTFLAGS='-C target-cpu=native' cargo build --offline --locked --release --example one_shot_lifetimes
+python3 scripts/run_one_shot_lifetimes.py --binary target/release/examples/one_shot_lifetimes \
+  --root /tmp/one-shot-pilot-new-empty
+```
+
+The default mu26 QA/RS pilot alternates AB/BA over two independent process rounds:
+eight processes, 24 measured trials. Do not treat the three trials within each
+process as three independent processes. A small smoke run can use `--mu 20 --rounds 1`.
+The explicitly selected largest follow-up uses `--mu 30 --modes release --rounds 1
+--continue-on-failure`, only after checking the pilot and implementation.
+
+Raw columns separately report Setup, input/claimed evaluation, commit, forward
+release, open, verify, serialization, diagnostics, cleanup and total wall. Wall
+includes all those phases but excludes CSV output. `online_total_ms` is explicitly
+commit+forward_release+open+verify. Witness release and first-tree query sub-timings
+are already included in open; do not add them to wall again. Every trial verifies,
+checks P/V post-challenges, fingerprints commitment/proof/challenge and fully drops
+its caller-owned oracle/parameters before the next Setup. Capacity/release-round
+columns record the actual ownership transition. The controller records peak RSS,
+commands, contracts and exits with no estimate-only exclusions or active memory
+threshold termination; explicit policy cancellation remains supported. All results
+are separate from the prior official and diagnostic datasets.
