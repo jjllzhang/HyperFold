@@ -1,0 +1,20 @@
+{
+  "protocol_reference_commit": "7bd0724311aed8b98aaaf889d40b16d83e13f0ba",
+  "description": "96 native-retained borrowed-open protocol references generated before removing storage-policy branches; functional uncertified configurations only",
+  "source_sha256": {
+    "src/pcs.rs": "70d614dc624d1b2af1d28e00748c484006a472ad30ae13a4e5adf6380653329b",
+    "src/params.rs": "2434cf15a8781e48d887ef719314337eddc078291690cd0ac33bb9bedd7b8130",
+    "src/encoder.rs": "623e7eba7286be7c6b67807af0e805fa1865d3ae7f7b828f198f5e55dd93cb0a",
+    "src/field_m127.rs": "26c423cde3de04c362fe1d08e0747e410c506c5f4bcc34cd1297f8f9f174e576",
+    "src/mmcs.rs": "9ff4372be210c9a8f59c664e00871f936e68bbb56763d1d4fb410deb62ca5631",
+    "src/sumcheck.rs": "9ff945b04bbaa615c374eb6ca5211aff57fe20cc227840244406463ff5630c2c",
+    "src/transcript.rs": "dc25f575679ddbc44637925fd5de233dc3e75e9abc957d1d5774c607fb9dde70"
+  },
+  "setup_seed_byte": 17,
+  "message_seed_byte": 18,
+  "point_seed_byte": 19,
+  "fingerprint_domain": "hyperfold-native-golden-v1",
+  "post_challenge_label": "golden-post-agreement",
+  "fixture_sha256": "84ad85ad75ea1976e7d62c24fbe8100cc153a673ea3a68fa226fd98ffaae92ab",
+  "generator_sha256": "4a0fb9f38e1bad808c719c0f336cd7efc2d144da724f4a5641733a91d9831e39"
+}
