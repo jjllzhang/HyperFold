@@ -20,7 +20,7 @@ def analyze(root,out):
     assert manifest['first_tree_strategy']=='prehashed_recovered'
     for f,digest in manifest['package_files'].items():assert sha(root/'source'/f)==digest
     assert sha(root/'frozen-field_m127.rs')==manifest['production_field_sha256'];assert sha(root/'root-Cargo.lock')==manifest['root_lock_sha256']
-    certificates={(s['mu'],s['backend'].lower()):s for s in rows(root/'m127-parameters.csv') if s['r']=='2' and s['c']=='4'}
+    certificates={(s['mu'],'qa' if s['backend'].lower().startswith('qa') else s['backend'].lower()):s for s in rows(root/'m127-parameters.csv') if s['r']=='2' and s['c']=='4'}
     raw=[];process=[];signatures={};seen=set()
     for job in manifest['jobs']:
         key=f"mu{job['mu']}-{job['backend']}-round{job['trial_round']}-{job['field_backend']}";assert key not in seen;seen.add(key);d=root/'cases'/key
