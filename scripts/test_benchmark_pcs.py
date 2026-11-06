@@ -106,6 +106,9 @@ sys.exit(7 if fail else 0)
                     bench.read_csv(output / "raw-samples.csv")[-1]["process_status"],
                     "runtime_failed",
                 )
+                partial = next(output.glob("cases/*/results.raw.csv"))
+                with self.assertRaises(ValueError):
+                    bench.summarize(bench.read_csv(partial))
 
     def test_existing_output_is_untouched(self):
         output = self.root / "results"

@@ -51,7 +51,11 @@ def summarize(records):
     for row in records:
         if row["schema_version"] != SCHEMA:
             raise ValueError("expected v2 benchmark CSV")
-        if row.get("process_status", "measured") != "measured":
+        if "process_status" not in row:
+            raise ValueError(
+                "use the runner's combined raw CSV with process exit-status labels"
+            )
+        if row["process_status"] != "measured":
             continue
         identity = {
             k: v
@@ -259,7 +263,14 @@ def run(args):
                             raise ValueError(
                                 "incomplete raw repetitions after successful exit"
                             )
-                        summaries.extend(summarize(case_raw))
+                        summaries.extend(
+                            summarize(
+                                [
+                                    dict(row, process_status="measured")
+                                    for row in case_raw
+                                ]
+                            )
+                        )
                         entry["status"] = "measured"
                 finally:
                     if not case_raw and raw.exists():
@@ -305,7 +316,7 @@ def main():
     parser.add_argument(
         "--summarize",
         type=Path,
-        help="read v2 raw CSV and print process summaries; no workload",
+        help="read the runner combined raw CSV and print process summaries; no workload",
     )
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path)
