@@ -177,3 +177,19 @@ changes are carried into the report without treating a signal as OOM proof.
 Regression checks run with `python3 -m unittest discover -s scripts -p 'test_*.py'`;
 the failure-classification fixture is explicitly synthetic and never published as
 an experimental result.
+
+## Isolated first-tree rebuild profile
+
+`examples/recompute_overhead.rs` uses the existing `OpenOptions` switch to compare
+retention and first-tree rebuilding. Both profiles keep the same two-direction
+Setup tables alive and use one common commitment followed by one warmup and three
+openings. Setup and commit are outside the open timer; no diagonal conversion is
+performed. Every opening is verified and its commitment/proof/post-challenge
+fingerprint must agree across repetitions and strategies.
+
+`scripts/profile_recompute_overhead.py` runs M127 mu24/26, r2/c4, QA and RS, 32
+threads, in independent sequential processes with counterbalanced strategy order.
+It reports descriptive opening-time deltas, sample standard deviations and
+process RSS. These fitting-size observations do not establish the exact overhead
+at mu30, where the full-retention baseline failed. The comparison measures the
+net effect of the rebuilding strategy, including its changed working set.
