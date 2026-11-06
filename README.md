@@ -28,11 +28,15 @@ See [protocol mapping](docs/protocol.md), [test coverage](docs/testing.md), and
 
 ## Retained benchmark results
 
-The final [report, plots and downloadable evidence](experiments/retained-2026-11-06/REPORT.md)
-cover 144 configurations: 142 measured cases (426 repetitions) and two actual
-memory-guard stops with blank measurements. All official runs retained their
-intermediate trees. The report includes archive-only analysis commands, raw samples,
-parameter provenance, peak RSS and file checksums.
+The latest [unguarded follow-up report](experiments/retained-unguarded-2026-11-06/REPORT.md)
+contains 142 complete cases (426 repetitions) and two actual process failures after
+memory termination was disabled. Both extreme cases exited 137 with signal 9;
+all incomplete timing and proof-size measurements are blank. Real memory traces,
+exit records, global OOM-counter observations and portable analysis are included.
+No recomputation was used, and the 142 previously measured cases are unchanged.
+
+The [earlier guarded snapshot](experiments/retained-2026-11-06/REPORT.md) remains
+available as historical evidence of the 12 GiB available-memory policy.
 
 ## Build and test
 

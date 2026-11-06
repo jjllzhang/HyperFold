@@ -1,0 +1,8 @@
+{
+  "reused_measured_cases": 142,
+  "identical_evidence_files": 994,
+  "source_root": "/home/zjl/zkp-research/experiments/hyperfold-bench/v3-r3-no-recompute-2026-11-06",
+  "runner_source_commit": "102a4ffd98ccb1a58aad0f5150dc97d423820500",
+  "runner_source_sha256": "7e5533b35d6661114b81a8479929890b03a4895dc8cdafa0f84df29c3f37a799",
+  "no_memory_termination_enabled": true
+}

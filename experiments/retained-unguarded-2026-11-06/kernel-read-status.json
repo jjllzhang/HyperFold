@@ -1,0 +1,16 @@
+{
+  "command": [
+    "journalctl",
+    "-k",
+    "--since",
+    "2026-11-06 05:48:00 UTC",
+    "--until",
+    "2026-11-06 05:56:00 UTC",
+    "--no-pager",
+    "--output",
+    "short-iso"
+  ],
+  "exit_code": 0,
+  "stderr": "Hint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n      Pass -q to turn off this notice.\n",
+  "matching_lines": 0
+}

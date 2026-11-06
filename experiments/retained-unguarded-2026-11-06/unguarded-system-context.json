@@ -1,0 +1,44 @@
+{
+  "utc": "2026-11-06T05:48:20.495121+00:00",
+  "meminfo": "MemTotal:       527984376 kB\nMemFree:        506942000 kB\nMemAvailable:   519694132 kB\nBuffers:          941792 kB\nCached:         13035220 kB\nSwapCached:        82912 kB\nActive:          4463748 kB\nInactive:       10889616 kB\nActive(anon):    1266944 kB\nInactive(anon):   122832 kB\nActive(file):    3196804 kB\nInactive(file): 10766784 kB\nUnevictable:        3104 kB\nMlocked:              16 kB\nSwapTotal:       2097148 kB\nSwapFree:        1197520 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:              6976 kB\nWriteback:             0 kB\nAnonPages:       1366724 kB\nMapped:           778164 kB\nShmem:             13236 kB\nKReclaimable:    2174796 kB\nSlab:            3927732 kB\nSReclaimable:    2174796 kB\nSUnreclaim:      1752936 kB\nKernelStack:       84000 kB\nPageTables:        58828 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    266089336 kB\nCommitted_AS:   23350260 kB\nVmallocTotal:   13743895347199 kB\nVmallocUsed:      494020 kB\nVmallocChunk:          0 kB\nPercpu:           556032 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nUnaccepted:            0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      488932 kB\nDirectMap2M:    21243904 kB\nDirectMap1G:    515899392 kB\n",
+  "cgroup": "0::/user.slice/user-1003.slice/session-3312.scope\n",
+  "cgroup_limits": {
+    "/sys/fs/cgroup/user.slice/user-1003.slice/session-3312.scope": {
+      "memory.max": "max",
+      "memory.high": "max",
+      "memory.swap.max": "max",
+      "memory.current": "5176217600",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"
+    },
+    "/sys/fs/cgroup/user.slice/user-1003.slice": {
+      "memory.max": "max",
+      "memory.high": "max",
+      "memory.swap.max": "max",
+      "memory.current": "11442573312",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"
+    },
+    "/sys/fs/cgroup/user.slice": {
+      "memory.max": "max",
+      "memory.high": "max",
+      "memory.swap.max": "max",
+      "memory.current": "15438196736",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0"
+    },
+    "/sys/fs/cgroup": {}
+  },
+  "rlimit_as": [
+    -1,
+    -1
+  ],
+  "rlimit_data": [
+    -1,
+    -1
+  ],
+  "rlimit_rss": [
+    -1,
+    -1
+  ],
+  "overcommit_memory": "0",
+  "kernel_settings_modified": false,
+  "swap_modified": false
+}

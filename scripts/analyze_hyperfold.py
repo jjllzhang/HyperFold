@@ -156,7 +156,8 @@ def main():
     for name in ('manifest.json', 'reused-source-manifest.json', 'reuse-validation.json',
                  'actual-attempt-policy.json', 'final-finished.json', 'policy-directive.json'):
         shutil.copy2(root / name, out / name)
-    for name in ('unguarded-system-context.json', 'baseline-source-manifest.json', 'baseline-policy-directive.json'):
+    for name in ('unguarded-system-context.json', 'baseline-source-manifest.json', 'baseline-policy-directive.json',
+                 'baseline-reuse-validation.json', 'kernel-read-status.json', 'kernel-oom-evidence.log'):
         if (root / name).exists():
             shutil.copy2(root / name, out / name)
     destination_parameters = out / 'parameters'
@@ -244,7 +245,7 @@ def main():
         'distinct outcomes. A SIGKILL alone does not establish an OOM; global OOM-counter changes '
         'are supporting host observations, not process-specific attribution.', '',
         f"Maximum recorded RSS: {float(peak['peak_rss_gib']):.3f} GiB at {' / '.join(key(peak))}. "
-        'Resource usage covers the full case process, including Setup and warmup.', '',
+        'Resource usage spans the actual process lifetime, including Setup or warmup that executed.', '',
         '## Reproduction and limits', '',
         f"Pinned executable SHA-256: `{manifest['contract']['binary_sha256']}`. "
         f"Source at policy migration: `{manifest['source_commit']}`; the original binary-build "
@@ -259,6 +260,11 @@ def main():
         'This is one machine and one Setup seed, with three repetitions, no CPU pinning and shared '
         'host/NUMA scheduling. Encoder contracts differ: Goldilocks RS uses coefficient FFT encoding; '
         'M127 RS uses systematic Lagrange encoding. Compare QA/RS at matched field, μ, r and c.', '',
+        '### Regenerate tables and figures', '',
+        'Requires Python 3.11+ and Matplotlib (here 3.10.6). Run from this report folder. '
+        'Parameter CSV hashes are verified; no prover executable is required for archived data analysis.', '',
+        '```sh\nmkdir evidence\ntar -xzf raw-evidence.tar.gz -C evidence\n'
+        'python3 analyze_hyperfold.py --root evidence --parameter-dir parameters --output regenerated\n```', '',
         '## Figures', '',
     ]
     for stem in ('commit','open','verify','proof_size'):

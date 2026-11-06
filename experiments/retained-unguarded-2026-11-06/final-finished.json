@@ -1,0 +1,11 @@
+{
+  "finished_utc": "2026-11-06T06:03:20.535271+00:00",
+  "processed": 144,
+  "measured": 142,
+  "memory_guard_stopped": 0,
+  "estimate_only_exclusions": 0,
+  "raw_samples": 426,
+  "recomputation_used": false,
+  "runtime_failed": 2,
+  "memory_guard_enabled": false
+}
