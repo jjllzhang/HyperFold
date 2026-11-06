@@ -59,7 +59,14 @@ def analyze(root, out):
         and not manifest["estimate_exclusions"]
     )
     recorded = rows(root / "results.csv")
-    assert len(recorded) == len(manifest["jobs"]) == finish["processes"]
+    attempted = finish.get("attempted_processes", finish["processes"])
+    planned = finish.get("planned_processes", len(manifest["jobs"]))
+    unattempted = finish.get("unattempted_processes", 0)
+    assert len(recorded) == attempted == finish["processes"]
+    assert planned == len(manifest["jobs"]) and planned == attempted + unattempted
+    if unattempted:
+        assert finish["run_status"] == "stopped" and finish["termination_reason"]
+    jobs = manifest["jobs"][:attempted]
     certificate_rows = {}
     for name, digest in manifest["parameters_sha256"].items():
         p = root / "parameters" / name
@@ -78,7 +85,7 @@ def analyze(root, out):
     signatures = {}
     measured = 0
     failed = 0
-    for job, entry in zip(manifest["jobs"], recorded):
+    for job, entry in zip(jobs, recorded):
         key = "{}-{}-{}-r{}-c{}-round{}".format(
             job["field"],
             job["backend"],
@@ -229,7 +236,11 @@ def analyze(root, out):
                 "fingerprint",
             ]:
                 assert entry[k] == ""
-        resource = (case / "resources.txt").read_text()
+        resource = (
+            (case / "resources.txt").read_text()
+            if (case / "resources.txt").exists()
+            else ""
+        )
         peak = re.search(r"Maximum resident set size \(kbytes\): (\d+)", resource)
         if peak:
             assert abs(float(entry["peak_rss_gib"]) - int(peak[1]) / 2**20) < 0.00000001
@@ -242,11 +253,14 @@ def analyze(root, out):
     table(out / "results.csv", recorded)
     table(out / "raw-samples.csv", all_raw)
     (out / "REPORT.md").write_text(
-        f'# Uniform one-shot run\n\nValidated {len(recorded)} processes: {measured} complete, {failed} incomplete. {len(all_raw)} completed raw measurements. All trials use fresh Setup,32threads,forward/witness release and queried-row recovery. Incomplete aggregate timing/size is blank; partial raw evidence remains archived.\n\nOnline total includes commit+forward release+open+verify; wall includes Setup/input/wire/diagnostics/cleanup. Peak RSS spans the whole process and warmup. This report does not mix historical cached lifecycles or infer process-specific OOM attribution.\n\nExecution source `{manifest["source_commit"]}`, binary SHA256 `{manifest["binary_sha256"]}`. Tests and measurements do not constitute a security proof.\n'
+        f'# Uniform one-shot run\n\nAttempted {attempted} of {planned} planned processes; {unattempted} unattempted. Termination reason: {finish.get("termination_reason") or "completed"}.\n\nValidated {len(recorded)} attempted processes: {measured} complete, {failed} incomplete. {len(all_raw)} completed raw measurements. Completed measured trials use fresh Setup,32threads,forward/witness release and queried-row recovery. Incomplete aggregate timing/size is blank; partial raw evidence remains archived.\n\nOnline total includes commit+forward release+open+verify; wall includes Setup/input/wire/diagnostics/cleanup. Peak RSS spans the whole process and warmup. This report does not mix historical cached lifecycles or infer process-specific OOM attribution.\n\nExecution source `{manifest["source_commit"]}`, binary SHA256 `{manifest["binary_sha256"]}`. Tests and measurements do not constitute a security proof.\n'
     )
     (out / "manifest.json").write_bytes((root / "manifest.json").read_bytes())
     return dict(
         processes=len(recorded),
+        planned_processes=planned,
+        unattempted_processes=unattempted,
+        termination_reason=finish.get("termination_reason"),
         measured=measured,
         runtime_failed=failed,
         complete_raw_samples=len(all_raw),

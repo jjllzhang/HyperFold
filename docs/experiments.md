@@ -45,7 +45,11 @@ removed from the official CLI; they are rejected rather than mapped silently.
 There is no estimate exclusion, active memory threshold or automatic fallback.
 The explicit policy file can cancel the owned workload. Failed/incomplete cases
 retain commands, partial samples and actual resource/exit records; the controller
-leaves their aggregate time/size blank. A signal alone is not PID-specific OOM
+leaves their aggregate time/size blank. `finished.json` also closes a default
+first-failure stop, distinguishing planned, attempted and unattempted jobs plus
+the termination reason; that attempted prefix can be analyzed and archived
+without launching later jobs. An unreadable policy stops/reaps the owned
+workload and records an error. A signal alone is not PID-specific OOM
 proof. `--continue-on-failure` explicitly permits later cases to be attempted.
 
 ## Timing and size contract

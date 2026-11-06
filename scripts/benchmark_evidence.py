@@ -67,25 +67,39 @@ def children(pid):
 
 
 def stop_workload(proc):
-    # Let GNU time survive to record the child's termination and resource usage.
-    child_pids = children(proc.pid)
-    if not child_pids:
+    """Reap our session leader and stop its owned group, preserving GNU time when possible."""
+    pending = children(proc.pid)
+    descendants = []
+    while pending:
+        pid = pending.pop()
+        descendants.append(pid)
+        pending.extend(children(pid))
+    try:
+        for pid in reversed(descendants):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if not descendants and proc.poll() is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
         try:
-            proc.wait(timeout=0.2)
-            return
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            child_pids = children(proc.pid)
-    for pid in child_pids:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+    finally:
+        # A wrapper may exit before a grandchild. This process group was created
+        # by our start_new_session=True and contains only this owned workload.
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    if not child_pids:
-        proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
 
 
@@ -133,40 +147,63 @@ def monitor_command(command, directory, policy_check):
             command, stdout=stdout, stderr=stderr, start_new_session=True
         )
         previous_log = 0.0
-        while proc.poll() is None:
-            available = available_bytes()
-            minimum_available = min(minimum_available, available)
-            rss, hwm = (0, 0)
-            for pid in children(proc.pid):
-                r, h = process_memory(pid)
-                rss += r
-                hwm = max(hwm, h)
-            peak_rss_kib = max(peak_rss_kib, rss)
-            peak_hwm_kib = max(peak_hwm_kib, hwm)
-            now = time.monotonic()
-            if now - previous_log >= 1:
-                trace.write(f"{utc()},{available},{rss},{hwm}\n")
-                trace.flush()
-                previous_log = now
-            if not policy_check():
-                reason = "policy_revoked"
-            if reason:
+        details = None
+        try:
+            while proc.poll() is None:
+                available = available_bytes()
+                minimum_available = min(minimum_available, available)
+                rss, hwm = (0, 0)
+                for pid in children(proc.pid):
+                    r, h = process_memory(pid)
+                    rss += r
+                    hwm = max(hwm, h)
+                peak_rss_kib = max(peak_rss_kib, rss)
+                peak_hwm_kib = max(peak_hwm_kib, hwm)
+                now = time.monotonic()
+                if now - previous_log >= 1:
+                    trace.write(f"{utc()},{available},{rss},{hwm}\n")
+                    trace.flush()
+                    previous_log = now
+                try:
+                    allowed = policy_check()
+                except Exception as error:
+                    reason = "policy_unreadable"
+                    details = {"type": type(error).__name__, "message": str(error)}
+                else:
+                    if not allowed:
+                        reason = "policy_revoked"
+                if reason:
+                    break
+                time.sleep(0.1)
+        except BaseException as error:
+            reason = (
+                "monitor_interrupted"
+                if isinstance(error, (KeyboardInterrupt, SystemExit))
+                else "monitor_error"
+            )
+            details = {"type": type(error).__name__, "message": str(error)}
+        finally:
+            if proc.poll() is None or reason is not None:
                 stop_workload(proc)
-                break
-            time.sleep(0.1)
-        rc = proc.wait()
+            rc = proc.wait()
+    try:
+        system_after = system_memory_snapshot()
+    except Exception as error:
+        system_after = {"observation_error": type(error).__name__}
     return {
         "started_utc": started,
         "finished_utc": utc(),
         "exit_code": rc,
+        "workload_pid": proc.pid,
         "stop_reason": reason,
+        "monitor_error": details,
         "memory_guard": False,
         "minimum_host_available_bytes": minimum_available,
         "observed_peak_rss_kib": peak_rss_kib,
         "observed_peak_hwm_kib": peak_hwm_kib,
         "memory_guard_enabled": False,
         "system_before": system_before,
-        "system_after": system_memory_snapshot(),
+        "system_after": system_after,
     }
 
 

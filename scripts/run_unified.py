@@ -173,6 +173,28 @@ def main():
     outcomes = []
     raw_all = []
     signatures = {}
+
+    def finish(termination_reason=None, error=None):
+        failed = sum(r["status"] == "runtime_failed" for r in outcomes)
+        result = dict(
+            finished_utc=utc(),
+            schema_version=SCHEMA,
+            processes=len(outcomes),
+            planned_processes=len(jobs),
+            attempted_processes=len(outcomes),
+            unattempted_processes=len(jobs) - len(outcomes),
+            measured=sum(r["status"] == "measured" for r in outcomes),
+            runtime_failed=failed,
+            complete_raw_samples=len(raw_all),
+            run_status="stopped" if termination_reason else "completed",
+            termination_reason=termination_reason,
+            error=error,
+        )
+        (root / "finished.json").write_text(json.dumps(result, indent=2) + "\n")
+        (root / "progress.json").write_text(
+            json.dumps(dict(phase=result["run_status"], **result)) + "\n"
+        )
+
     for job in jobs:
         key = "{}-{}-{}-r{}-c{}-round{}".format(
             job["field"],
@@ -232,9 +254,20 @@ def main():
             )
             + "\n"
         )
-        if not enabled():
+        try:
+            allowed = enabled()
+        except Exception as error:
+            finish(
+                "policy_unreadable", dict(type=type(error).__name__, message=str(error))
+            )
+            raise RuntimeError(
+                "execution policy unreadable; no further work launched"
+            ) from error
+        if not allowed:
+            finish("policy_revoked")
             raise RuntimeError("execution policy revoked")
         if sha(binary) != manifest["binary_sha256"]:
+            finish("binary_changed")
             raise RuntimeError("binary changed")
         observed = monitor_command(command, case, enabled)
         observed["execution_contract"] = contract
@@ -247,6 +280,7 @@ def main():
         summary = rows(case / "results.csv") if (case / "results.csv").exists() else []
         complete = (
             observed["exit_code"] == 0
+            and observed["stop_reason"] is None
             and len(summary) == 1
             and len(current) == a.repetitions
         )
@@ -312,23 +346,16 @@ def main():
         write_table(root / "results.csv", outcomes)
         write_table(root / "raw-samples.csv", raw_all)
         if not complete and (
-            not a.continue_on_failure or observed["stop_reason"] == "policy_revoked"
+            not a.continue_on_failure or observed["stop_reason"] is not None
         ):
+            finish(
+                observed["stop_reason"] or "worker_failed",
+                observed.get("monitor_error"),
+            )
             raise RuntimeError(
                 f"{key} incomplete; evidence preserved and aggregates blank"
             )
-    finished = dict(
-        finished_utc=utc(),
-        processes=len(outcomes),
-        measured=sum(r["status"] == "measured" for r in outcomes),
-        runtime_failed=sum(r["status"] == "runtime_failed" for r in outcomes),
-        complete_raw_samples=len(raw_all),
-        schema_version=SCHEMA,
-    )
-    (root / "finished.json").write_text(json.dumps(finished, indent=2) + "\n")
-    (root / "progress.json").write_text(
-        json.dumps(dict(phase="finished", **finished)) + "\n"
-    )
+    finish()
 
 
 if __name__ == "__main__":
