@@ -196,3 +196,39 @@ net effect of the rebuilding strategy, including its changed working set.
 
 The completed [paired measurements and raw evidence](../experiments/recompute-overhead-2026-11-06/REPORT.md)
 contain eight processes, 24 raw samples and four matching proof/transcript fingerprints.
+
+## Queried-row recovery with constructor controls
+
+The finalized supplement is
+`/home/zjl/zkp-research/notes/impl-plan-hyperfold-query-row-recovery.md`.
+`FirstTreeStrategy` selects native retention (A), prehashed retention (B), or
+prehashed queried-row recovery (C); the legacy rebuilding option remains supported.
+B/C share the canonical parallel leaf hashing function and the pinned Plonky3
+`new_over_leaf_digests` constructor. C's tree owns only a borrowed row descriptor,
+not the dense first intermediate codeword. The dense matrix is released once its
+successor is folded, before the successor's tree is committed (immediately after
+first-tree construction at depth two; no operation at depth one). Queries use
+native `open_multi_batch` and the existing wire format and omission rules.
+
+```sh
+RUSTFLAGS='-C target-cpu=native' cargo build --offline --locked --release --example query_row_overhead
+python3 scripts/profile_query_rows.py --binary target/release/examples/query_row_overhead \
+  --output-dir /tmp/hyperfold-query-rows-new-empty
+```
+
+The controller uses M127 mu26/r2/c4, QA/RS, 32 threads, both Setup directions,
+and three rounds ordered ABC/BCA/CAB. Each strategy process reuses a common
+commitment, executes one warmup and three measured openings, for 18 processes and
+54 measurements. It preserves exact commands, exit status, resources and raw data.
+A diagnostic smoke run can use `--mu 20 --rounds 1 --repetitions 1`; it is not the
+specified mu26 measurement.
+
+Opening totals include leaf hashing, row recovery, allocation/release and native
+multiproof extraction. `first_tree_query_ms` is one coarse timing of the first tree's
+query extraction plus cross-layer compression, including row recovery in C; it is
+not pure recovery arithmetic and must not be subtracted from the opening total.
+Verification and final proof encoding are outside open. Compare C−A for the overall
+strategy, B−A for construction-entry changes, and C−B for storage/recovery with the
+same constructor. Report the three independent process means and their variation,
+not nine independent processes per strategy. These new diagnostics do not alter
+the 142-case official baseline or establish an exact mu30 overhead.
