@@ -1,0 +1,10 @@
+{
+  "finished_utc": "2026-11-06T09:53:42.900714+00:00",
+  "processes": 8,
+  "measured": 8,
+  "runtime_failed": 0,
+  "complete_raw_samples": 24,
+  "setup_per_trial": true,
+  "first_tree_strategy": "prehashed_recovered",
+  "memory_guard_enabled": false
+}

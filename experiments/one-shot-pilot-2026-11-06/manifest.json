@@ -1,0 +1,74 @@
+{
+  "started_utc": "2026-11-06T09:36:27.667272+00:00",
+  "source_commit": "7c19ef969514bb1b8915dc7d3a998384899137fc",
+  "source_status": "",
+  "binary_sha256": "813413a6f4d8462d58ab8a2f544af97efdf8722327e1bb01d66ad2ce4520f490",
+  "mu": 26,
+  "r": 2,
+  "c": 4,
+  "field": "M127",
+  "threads": 32,
+  "process_rounds": 2,
+  "repetitions": 3,
+  "warmup": 1,
+  "setup_per_trial": true,
+  "first_tree_strategy": "prehashed_recovered",
+  "jobs": [
+    [
+      1,
+      "qa",
+      "retained"
+    ],
+    [
+      1,
+      "qa",
+      "release"
+    ],
+    [
+      1,
+      "rs",
+      "retained"
+    ],
+    [
+      1,
+      "rs",
+      "release"
+    ],
+    [
+      2,
+      "qa",
+      "release"
+    ],
+    [
+      2,
+      "qa",
+      "retained"
+    ],
+    [
+      2,
+      "rs",
+      "release"
+    ],
+    [
+      2,
+      "rs",
+      "retained"
+    ]
+  ],
+  "modes": [
+    "retained",
+    "release"
+  ],
+  "memory_guard_enabled": false,
+  "estimate_exclusions": false,
+  "whole_tree_rebuild": false,
+  "directive": "69fd73e0-2c8f-43a0-a570-356f7828c11e",
+  "setup_seed_byte": 42,
+  "message_seed_byte": 27,
+  "point_seed_byte": 28,
+  "plan": "/home/zjl/zkp-research/notes/impl-plan-hyperfold-one-shot-lifetimes.md",
+  "build_flags": "-C target-cpu=native",
+  "wall_scope": "Setup/input+claimed evaluation/commit/forward release/open/verify/serialization/diagnostics/cleanup; CSV IO excluded",
+  "online_scope": "commit+forward_release+open+verify; Setup/input/serialization/diagnostics/cleanup separately reported",
+  "scope": "separate lifecycle experiment; never overwrite official142, prior diagnostics or actual failures"
+}
