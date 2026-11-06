@@ -17,7 +17,7 @@
 
 不能把这个总计结果扩展成“所有阶段都稳定更快”。例如 μ26 QA 的 ark commit 均值比自研多约 3.04%，但逐轮差值从 −38.1 毫秒到 +459.3 毫秒，跨零；部分 verify 均值也非常接近。结果表逐项保留这些差异。
 
-完整 commit/open/verify、Setup/释放/清理、全程、证明字节与峰值内存见 [REPORT.md](REPORT.md)。RSS 同时给出“各独立进程峰值的均值”和“最大观测峰值”；μ26 三后端均约 28 GiB，未观测到有实用意义的内存优势。每点三个后端的参数 ID、承诺根、y₀、证明和后续挑战指纹以及编码大小完全一致。
+完整 commit/open/verify、全程、证明字节与峰值内存见 [REPORT.md](REPORT.md)；Setup、释放和清理的逐进程值及跨进程统计见 [process-means.csv](process-means.csv)、[strategy-means.csv](strategy-means.csv)。RSS 同时给出“各独立进程峰值的均值”和“最大观测峰值”；μ26 三后端均约 28 GiB，未观测到有实用意义的内存优势。每点三个后端的参数 ID、承诺根、y₀、证明和后续挑战指纹以及编码大小完全一致。
 
 这些结果测的是本次真实 PCS 接入，而不是仅比较裸算术。ark 使用同素数的通用 Montgomery Fp128 和原生 Fp2；FourQ 使用固定的 Linux/AMD64 UINT128 C 路径和原生扩域操作，经专用标量 FFI 接入。它们在实际编码边界的规范值导出，以及 FourQ 的 FFI 调用成本，都进入相应计时阶段。尚未单独剖析各项适配开销的占比，因此不能把全部差距归因于某一项。FourQ 的 ASM 或融合批量 PCS 接口不在本次对照中。
 
@@ -26,3 +26,5 @@ FourQ 内部 [0,p] 的冗余表示无需逐次规范化；边界和逆元合同�
 四张数值表已从原始归档重建并逐字节相同：`raw-samples.csv`、`process-means.csv`、`strategy-means.csv`、`paired-differences.csv`。固定执行源码为 `c587b844072d1ff24260a976d6f4a224a77d995f`，二进制 SHA256 为 `dac23d2cd9e97f0d2122b9be7a8e40f451e8238402ae841552e0117cf796c637`。报告内 RSS 标注属于后处理修订，数值表与运行二进制未变；后处理脚本哈希另在 validation.json 中记录。
 
 当前建议保留自研默认后端，并独立完成用户要求的旧内存路径清理。本次未启动全 72 组重跑，也未改动历史 142 组、原失败或最大两组成功记录。
+
+[Architect 的独立数据复核](https://raft-artifacts.com/p/zkp-research/hyperfold-m127-pcs-review-2026-11-06)已通过：36 进程、108 条记录及四张归档重建 CSV 一致；本次复核未启动性能负载。
