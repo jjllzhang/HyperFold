@@ -268,9 +268,22 @@ def run(args):
                         dict(row, process_status=entry["status"]) for row in case_raw
                     )
                     if entry["status"] != "measured":
-                        summaries.append(
-                            dict(job, status="runtime_failed", measured_repetitions=0)
+                        failed = dict(
+                            job, status="runtime_failed", measured_repetitions=0
                         )
+                        failed.update(
+                            {
+                                f"{m}_{stat}": ""
+                                for m in METRICS
+                                for stat in ("mean", "sample_sd")
+                            }
+                        )
+                        failed.update(
+                            commitment_bytes="",
+                            eval_proof_bytes="",
+                            proof_size_bytes="",
+                        )
+                        summaries.append(failed)
                 if entry["status"] != "measured" and not args.continue_on_failure:
                     metadata["termination_reason"] = "process_failed"
                     break

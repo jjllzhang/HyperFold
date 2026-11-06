@@ -100,8 +100,8 @@ sys.exit(7 if fail else 0)
                 self.assertEqual(metadata["unattempted_processes"], 3 - failed_at)
                 self.assertEqual(metadata["processes"][-1]["exit_code"], 7)
                 last = bench.read_csv(output / "results.csv")[-1]
-                self.assertEqual(last.get("commit_ms_mean", ""), "")
-                self.assertEqual(last.get("proof_size_bytes", ""), "")
+                self.assertEqual(last["commit_ms_mean"], "")
+                self.assertEqual(last["proof_size_bytes"], "")
                 self.assertEqual(
                     bench.read_csv(output / "raw-samples.csv")[-1]["process_status"],
                     "runtime_failed",
