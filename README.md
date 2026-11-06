@@ -18,15 +18,27 @@ proof of this implementation, its Fiat–Shamir compilation, or a deployment.
   authentication paths are deduplicated. Each intermediate opened bundle omits one
   deterministic parent-derived coordinate; the verifier restores it before hashing
   and checks **all** incoming folding equalities, including collisions.
-- Explicit optional single-diagonal and first-tree recomputation memory mode,
-  with proof/transcript byte equivalence checks and separate conversion timing.
+- Uniform one-shot benchmark ownership: release forward diagonals after commit,
+  release the original witness after its first lifted fold, retain first-tree
+  hashes and recover only queried rows. Reusable borrowed library opens remain
+  available; official timings always use the owning lifecycle.
 - Canonical field bytes, framed Blake3 transcript, exact wire-size reporting,
   32-thread benchmark CLI and Criterion benchmark.
 
 See [protocol mapping](docs/protocol.md), [test coverage](docs/testing.md), and
 [experiment instructions](docs/experiments.md).
 
-## Retained benchmark results
+## Latest results
+
+The [native M127 PCS comparison](experiments/m127-pcs-backends-2026-11-06/FINDINGS.md)
+completed36 independent processes/108 measurements at four representative points.
+The frozen custom backend had the lowest online/full-wall mean at all four;
+ark/FourQ remain experimental adapters, and the production default stays custom.
+The [largest two one-shot cases](experiments/one-shot-mu30-2026-11-06/REPORT.md)
+both completed at about448 GiB using the release/query-recovery strategy.
+Newly compiled cleanup code is checked separately; old observations are immutable.
+
+## Historical retained benchmark results
 
 The [native-retained unguarded follow-up report](experiments/retained-unguarded-2026-11-06/REPORT.md)
 contains 142 complete cases (426 repetitions) and two actual process failures after
@@ -80,14 +92,17 @@ native SIMD validation and benchmarks on a compatible host:
 RUSTFLAGS='-C target-cpu=native' RAYON_NUM_THREADS=8 cargo test --locked --release
 RUSTFLAGS='-C target-cpu=native' cargo build --locked --release --bin bench
 ./target/release/bench --list
-./target/release/bench --quick --threads 32 --repetitions 1 --output bench-results/smoke.csv
+./target/release/bench --fields m127 --backends qa --mu 20 --r 2 --c 4 \
+  --threads 32 --repetitions 1 --output bench-results/smoke-new.csv
 RUSTFLAGS='-C target-cpu=native' cargo bench --locked --bench pcs
 ```
 
-`--quick` uses **uncertified** small functional parameters. It is not evidence for
-100-bit soundness. The ordinary sweep uses **only** the 144 certified uniform-profile
-rows; Goldilocks is always cubic and M127 always quadratic. Degree-2 Goldilocks
-support is functional/generic only, not selected for the official experiment.
+Every official warmup/trial uses fresh Setup and the same owning lifecycle;
+summary/raw paths must be new. Legacy memory switches, estimates, resume and quick
+mode are rejected. All selected rows are certified uniform-profile configurations;
+small uncertified configurations are limited to functional tests. The CLI accepts
+only32-thread timing runs. See the experiment guide for isolated-process commands,
+phase costs, failure records and pure-archive reconstruction.
 
 ## Parameter provenance and security boundary
 

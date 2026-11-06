@@ -1,6 +1,7 @@
 //! Research HyperFold PCS prototype. Tests and IOP parameters are not a security proof
 //! of the Fiat–Shamir compilation or this implementation. Not production cryptography.
 pub mod base_code;
+pub mod benchmark;
 pub mod codec;
 pub mod encoder;
 pub mod field_m127;

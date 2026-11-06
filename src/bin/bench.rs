@@ -1,29 +1,28 @@
-//! Reproducible sequential experiment sweep. All prover/verifier parallel work
-//! uses the requested local Rayon pool; no background services or remote effects.
+//! One official lifecycle for every certified field/code/size selection.
 use clap::Parser;
 use hyperfold_pcs::{
-    codec,
+    benchmark::{METRICS, TrialRecord, run_trial},
     field_m127::{M127Quad, Mersenne127},
-    params::{self, BaseCodeKind, BaseFieldKind, HyperFoldConfig},
-    pcs::{FirstTreeStrategy, HyperFoldPcs, OpenOptions},
-    resources::estimated_gib,
-    sampling::{SampleBase, stream},
-    sumcheck::evaluate,
+    params::{BaseCodeKind, BaseFieldKind, CERTIFIED_CONFIGS, HyperFoldConfig},
+    sampling::SampleBase,
 };
+use p3_field::ExtensionField;
 use p3_field::extension::CubicTrinomialExtensionField;
-use p3_field::{AlgebraIdentity, BasedVectorSpace, ExtensionField};
 use p3_goldilocks::Goldilocks;
 use std::{
-    fs::{File, OpenOptions as FileOptions},
+    fs::{File, OpenOptions},
     io::{BufWriter, Write},
-    path::PathBuf,
-    time::Instant,
+    path::{Path, PathBuf},
 };
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+const SCHEMA: &str = "hyperfold-one-shot-bench-v1";
 #[derive(Parser, Debug)]
+#[command(
+    about = "Fresh Setup, one-shot release and queried-row recovery; no legacy memory switches/resume"
+)]
 struct Args {
     #[arg(long, default_value_t = 32)]
     threads: usize,
-    /// Comma-separated even sizes or inclusive even sweep, e.g. 20..=30.
     #[arg(long, default_value = "20..=30")]
     mu: String,
     #[arg(long, value_delimiter = ',', default_value = "2,4,8")]
@@ -36,547 +35,290 @@ struct Args {
     fields: Vec<String>,
     #[arg(long, default_value_t = 3)]
     repetitions: usize,
-    #[arg(long)]
-    quick: bool,
-    /// Print all selected cases and conservative memory estimates; allocate no setup.
+    #[arg(long, default_value_t = 1)]
+    trial_round: usize,
+    /// List selected certified rows without allocating Setup or running timings.
     #[arg(long)]
     list: bool,
-    /// Memory safety ceiling (GiB); cases above this are recorded as skipped_memory.
-    #[arg(long, default_value_t = 64.0)]
-    max_estimated_gib: f64,
-    #[arg(
-        long,
-        default_value = "/home/zjl/zkp-research/experiments/hyperfold-bench/results.csv"
-    )]
-    output: PathBuf,
-    #[arg(long)]
-    resume: bool,
-    /// auto selects low-memory only when retained storage exceeds the ceiling.
-    #[arg(long, default_value="auto", value_parser=["auto", "retained", "low"])]
-    memory_mode: String,
-    /// Explicit queried-row strategy; requires retained memory mode and a new output.
-    /// No estimate model or estimate-only exclusion is applied to this strategy.
-    #[arg(long, value_parser=["recovered"])]
-    first_tree_strategy: Option<String>,
+    /// New summary path; companion .raw.csv must also be absent.
+    #[arg(long, required_unless_present = "list")]
+    output: Option<PathBuf>,
 }
-fn validate_modes(args: &Args) -> Result<(), &'static str> {
-    if args.first_tree_strategy.is_some() && (args.memory_mode != "retained" || args.resume) {
-        return Err(
-            "recovered requires explicit --memory-mode retained and a fresh output (no --resume)",
-        );
-    }
-    Ok(())
-}
-fn strategy_suffix(args: &Args, fingerprint: &str) -> String {
-    if args.first_tree_strategy.is_some() {
-        format!(",prehashed_recovered,retained_both,{fingerprint}")
-    } else {
-        String::new()
-    }
-}
-fn strategy_header(args: &Args) -> &'static str {
-    if args.first_tree_strategy.is_some() {
-        ",first_tree_strategy,diagonal_storage,fingerprint"
-    } else {
-        ""
-    }
-}
-fn mus(input: &str) -> Result<Vec<usize>, String> {
-    if let Some((a, b)) = input.split_once("..=") {
-        let a = a.parse::<usize>().map_err(|e| e.to_string())?;
-        let b = b.parse::<usize>().map_err(|e| e.to_string())?;
+fn mus(input: &str) -> Result<Vec<usize>> {
+    let v = if let Some((a, b)) = input.split_once("..=") {
+        let a = a.parse::<usize>()?;
+        let b = b.parse::<usize>()?;
         if a > b || b > 30 {
             return Err("invalid mu range".into());
         }
-        Ok((a..=b).filter(|x| x % 2 == 0).collect())
+        (a..=b).filter(|v| v % 2 == 0).collect()
     } else {
         input
             .split(',')
-            .map(|s| {
-                s.parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())
-            })
-            .collect()
-    }
-}
-fn low_memory(c: HyperFoldConfig, args: &Args) -> bool {
-    args.memory_mode == "low"
-        || (args.memory_mode == "auto" && estimated_gib(c, false) > args.max_estimated_gib)
-}
-fn name(c: HyperFoldConfig) -> String {
-    format!(
-        "{:?},{:?},{},{},{}",
-        c.base_field, c.backend, c.mu, c.r, c.c
-    )
-}
-fn output(
-    path: &PathBuf,
-    resume: bool,
-    header: &str,
-    fresh_only: bool,
-) -> std::io::Result<BufWriter<File>> {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    let existing = resume && path.exists() && path.metadata()?.len() > 0;
-    let file = if fresh_only {
-        // Atomic no-clobber even if a path appears after the pair preflight.
-        FileOptions::new().write(true).create_new(true).open(path)?
-    } else {
-        FileOptions::new()
-            .create(true)
-            .write(true)
-            .append(resume)
-            .truncate(!resume)
-            .open(path)?
+            .map(str::parse)
+            .collect::<std::result::Result<Vec<usize>, _>>()?
     };
-    let mut w = BufWriter::new(file);
-    if !existing {
-        writeln!(w, "{header}")?;
+    if v.is_empty() || v.iter().any(|v| !(20..=30).contains(v) || v % 2 != 0) {
+        return Err("mu must select certified even sizes20..30".into());
     }
-    Ok(w)
+    Ok(v)
 }
-/// Preflight both destinations before creating either, then use atomic no-clobber.
-fn prepare_outputs(args: &Args) -> std::io::Result<(BufWriter<File>, BufWriter<File>)> {
-    let fresh_only = args.first_tree_strategy.is_some();
-    if fresh_only {
-        for path in [&args.output, &args.output.with_extension("raw.csv")] {
-            match std::fs::symlink_metadata(path) {
-                Ok(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        format!("recovered output must be new: {}", path.display()),
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+fn configs(args: &Args) -> Result<Vec<HyperFoldConfig>> {
+    if args.threads != 32 || args.repetitions == 0 || args.trial_round == 0 {
+        return Err("benchmark requires32threads and positive repetitions/trial-round".into());
+    }
+    let mus = mus(&args.mu)?;
+    let fields = args
+        .fields
+        .iter()
+        .map(|f| match f.as_str() {
+            "goldilocks" => Ok(BaseFieldKind::Goldilocks),
+            "m127" => Ok(BaseFieldKind::M127),
+            _ => Err("unknown field"),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let codes = args
+        .backends
+        .iter()
+        .map(|f| match f.as_str() {
+            "qa" => Ok(BaseCodeKind::Qa),
+            "rs" => Ok(BaseCodeKind::Rs),
+            _ => Err("unknown backend"),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if args.r.iter().any(|r| ![2, 4, 8].contains(r)) || args.c.iter().any(|c| ![2, 4].contains(c)) {
+        return Err("r/c must select certified rows".into());
+    }
+    let selected = CERTIFIED_CONFIGS
+        .iter()
+        .filter(|c| {
+            fields.contains(&c.base_field)
+                && codes.contains(&c.backend)
+                && mus.contains(&c.mu)
+                && args.r.contains(&c.r)
+                && args.c.contains(&c.c)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err("empty configuration selection".into());
+    }
+    Ok(selected)
+}
+fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
+    vec![
+        SCHEMA.into(),
+        format!("{:?}", c.base_field),
+        format!("{:?}", c.backend),
+        c.mu.to_string(),
+        c.r.to_string(),
+        c.c.to_string(),
+        c.mu0.to_string(),
+        c.depth().to_string(),
+        c.extension_degree.to_string(),
+        c.num_queries.to_string(),
+        args.threads.to_string(),
+        args.trial_round.to_string(),
+        "prehashed_recovered".into(),
+        "opening_only".into(),
+        "consumed_after_first_round".into(),
+        "true".into(),
+    ]
+}
+const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
+const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes,fingerprint,parameters_id,commitment_root,y0_hash,proof_hash,challenge_hash";
+fn proof_cells(r: &TrialRecord) -> Vec<String> {
+    vec![
+        r.commitment_bytes.to_string(),
+        r.eval_proof_bytes.to_string(),
+        (r.commitment_bytes + r.eval_proof_bytes).to_string(),
+        r.fingerprint.clone(),
+        r.parameters_id.clone(),
+        r.commitment_root.clone(),
+        r.y0_hash.clone(),
+        r.proof_hash.clone(),
+        r.challenge_hash.clone(),
+    ]
+}
+fn fresh(path: &Path, header: &str) -> Result<BufWriter<File>> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
+    writeln!(file, "{header}")?;
+    file.flush()?;
+    Ok(file)
+}
+fn outputs(path: &Path) -> Result<(BufWriter<File>, BufWriter<File>)> {
+    let raw = path.with_extension("raw.csv");
+    for p in [path, raw.as_path()] {
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => return Err(format!("output must be new: {}", p.display()).into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
     }
-    let results = output(
-        &args.output,
-        args.resume,
-        &format!(
-            "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms{}",
-            strategy_header(args)
-        ),
-        fresh_only,
+    let stats = METRICS
+        .iter()
+        .flat_map(|m| [format!("{m}_mean"), format!("{m}_sample_sd")])
+        .collect::<Vec<_>>()
+        .join(",");
+    let summary = fresh(
+        path,
+        &format!("{ID},status,measured_repetitions,{stats},{PROOF}"),
     )?;
-    let raw = output(
-        &args.output.with_extension("raw.csv"),
-        args.resume,
+    let raw = fresh(
+        &raw,
         &format!(
-            "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms{}",
-            strategy_header(args)
+            "{ID},repetition,{},forward_capacity_elements,inverse_capacity_elements,released_witness_elements,released_witness_capacity,witness_release_level,witness_release_subround,{PROOF}",
+            METRICS.join(",")
         ),
-        fresh_only,
     )?;
-    Ok((results, raw))
+    Ok((summary, raw))
 }
-type Measurements = (f64, f64, f64, usize, usize, f64, String);
-type BenchError = Box<dyn std::error::Error + Send + Sync>;
-fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
-    config: HyperFoldConfig,
+fn run<F: SampleBase, E: ExtensionField<F>>(
+    c: HyperFoldConfig,
     args: &Args,
+    summary: &mut impl Write,
     raw: &mut impl Write,
-) -> Result<Measurements, BenchError> {
-    let setup_start = Instant::now();
-    let low = low_memory(config, args);
-    let mut pcs = if low {
-        HyperFoldPcs::<F, E>::setup_low_memory(config, [42; 32])?
-    } else {
-        HyperFoldPcs::<F, E>::setup(config, [42; 32])?
-    };
-    let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
-    let mut sum = [0.0; 3];
-    let mut transition_sum = 0.0;
-    let mut bytes = (0, 0);
-    let mut reference_fingerprint = None;
-    let mut fingerprint = String::new();
+) -> Result<()> {
+    let mut reference = None;
+    let mut samples = Vec::with_capacity(args.repetitions);
+    let mut last = None;
     for repetition in 0..=args.repetitions {
-        let mut rng = stream(&[27; 32], b"benchmark-message", config.mu as u64);
-        let message: Vec<F> = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
-        let mut rng = stream(&[28; 32], b"benchmark-eval-point", config.mu as u64);
-        let z: Vec<E> = (0..config.mu)
-            .map(|_| {
-                <E as BasedVectorSpace<F>>::from_basis_coefficients_fn(|_| F::sample(&mut rng))
-            })
-            .collect();
-        let y = evaluate(&message, &z);
-        let start = Instant::now();
-        pcs.prepare_commit();
-        let commit_transition = start.elapsed();
-        let start = Instant::now();
-        let (cm, data) = pcs.commit(message)?;
-        let commit = start.elapsed().as_secs_f64() * 1000.0;
-        let start = Instant::now();
-        pcs.prepare_open();
-        let transition_ms = (commit_transition + start.elapsed()).as_secs_f64() * 1000.0;
-        let start = Instant::now();
-        let (proof, mut prover) = if args.first_tree_strategy.is_some() {
-            assert!(pcs.diagonals.has_forward() && pcs.diagonals.has_inverse());
-            pcs.open_with_strategy(&cm, &data, &z, y, FirstTreeStrategy::PrehashedRecovered)?
+        let r = run_trial::<F, E>(c)?;
+        if let Some(expected) = reference.as_ref() {
+            if expected != &r.fingerprint {
+                return Err("nondeterministic proof/transcript".into());
+            }
         } else {
-            pcs.open_with_options(
-                &cm,
-                &data,
-                &z,
-                y,
-                OpenOptions {
-                    recompute_first_tree: low,
-                },
-            )?
+            reference = Some(r.fingerprint.clone());
+        }
+        if repetition == 0 {
+            continue;
+        }
+        let mut row = identity(c, args);
+        row.push(repetition.to_string());
+        row.extend(r.metrics().map(|x| format!("{x:.6}")));
+        row.extend([
+            r.forward_capacity.to_string(),
+            r.inverse_capacity.to_string(),
+            r.timings.released_witness_elements.to_string(),
+            r.timings.released_witness_capacity.to_string(),
+            r.timings
+                .witness_release_round
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            r.timings
+                .witness_release_round
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+        ]);
+        row.extend(proof_cells(&r));
+        writeln!(raw, "{}", row.join(","))?;
+        raw.flush()?;
+        samples.push(r.metrics());
+        last = Some(r);
+    }
+    let mut row = identity(c, args);
+    row.extend(["measured".into(), samples.len().to_string()]);
+    for m in 0..METRICS.len() {
+        let mean = samples.iter().map(|r| r[m]).sum::<f64>() / samples.len() as f64;
+        let sd = if samples.len() > 1 {
+            (samples.iter().map(|r| (r[m] - mean).powi(2)).sum::<f64>()
+                / (samples.len() - 1) as f64)
+                .sqrt()
+        } else {
+            0.
         };
-        let open = start.elapsed().as_secs_f64() * 1000.0;
-        let start = Instant::now();
-        let mut verifier = pcs.verify(&cm, &z, y, &proof)?;
-        let verify = start.elapsed().as_secs_f64() * 1000.0;
-        let challenge = prover.sample::<F, E>(b"post-benchmark-agreement");
-        if challenge != verifier.sample::<F, E>(b"post-benchmark-agreement") {
-            return Err("transcript disagreement".into());
-        }
-        let cm_bytes = codec::encode(&cm)?;
-        let proof_bytes = codec::encode(&proof)?;
-        let sizes = (cm_bytes.len(), proof_bytes.len());
-        if args.first_tree_strategy.is_some() {
-            let mut hash = blake3::Hasher::new();
-            hash.update(b"hyperfold-formal-recovered-bench-v1");
-            hash.update(&(cm_bytes.len() as u64).to_le_bytes());
-            hash.update(&cm_bytes);
-            hash.update(&proof_bytes);
-            hash.update(&codec::encode(&challenge)?);
-            let current = hash.finalize();
-            if let Some(expected) = reference_fingerprint {
-                if current != expected {
-                    return Err("non-deterministic proof/transcript fingerprint".into());
-                }
-            } else {
-                reference_fingerprint = Some(current);
-            }
-            fingerprint = current.to_hex().to_string();
-        }
-        if repetition > 0 {
-            if repetition > 1 && sizes != bytes {
-                return Err("non-deterministic proof size".into());
-            }
-            bytes = sizes;
-            transition_sum += transition_ms;
-            for (acc, v) in sum.iter_mut().zip([commit, open, verify]) {
-                *acc += v;
-            }
-            let estimate = if args.first_tree_strategy.is_some() {
-                String::new()
-            } else {
-                format!("{:.9}", estimated_gib(config, low))
-            };
-            let suffix = strategy_suffix(args, &fingerprint);
-            writeln!(
-                raw,
-                "{},{},{},{},{},{},{estimate},{commit:.6},{open:.6},{verify:.6},{},{},{setup_ms:.6},{low},{transition_ms:.6}{suffix}",
-                name(config),
-                config.mu0,
-                config.extension_degree,
-                config.num_queries,
-                repetition,
-                config.certified,
-                sizes.0,
-                sizes.1
-            )?;
-            raw.flush()?;
-        }
+        row.extend([format!("{mean:.6}"), format!("{sd:.6}")]);
     }
-    // Both Setup directions must remain live even through the final recovered opening.
-    if args.first_tree_strategy.is_some() {
-        std::hint::black_box(&pcs);
-    }
-    Ok((
-        sum[0] / args.repetitions as f64,
-        sum[1] / args.repetitions as f64,
-        sum[2] / args.repetitions as f64,
-        bytes.0,
-        bytes.1,
-        transition_sum / args.repetitions as f64,
-        fingerprint,
-    ))
+    row.extend(proof_cells(&last.unwrap()));
+    writeln!(summary, "{}", row.join(","))?;
+    summary.flush()?;
+    Ok(())
 }
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() -> Result<()> {
     let args = Args::parse();
-    validate_modes(&args)?;
-    if args.threads == 0
-        || args.repetitions == 0
-        || !args.max_estimated_gib.is_finite()
-        || args.max_estimated_gib <= 0.0
-    {
-        return Err("threads/repetitions/memory ceiling must be positive".into());
-    }
-    let ms = if args.quick { vec![10] } else { mus(&args.mu)? };
-    let mut cases = Vec::new();
-    for f in &args.fields {
-        let field = match f.as_str() {
-            "goldilocks" => BaseFieldKind::Goldilocks,
-            "m127" => BaseFieldKind::M127,
-            _ => return Err("unknown field".into()),
-        };
-        for &mu in &ms {
-            for &r in &args.r {
-                for &c in &args.c {
-                    for b in &args.backends {
-                        let backend = match b.as_str() {
-                            "qa" => BaseCodeKind::Qa,
-                            "rs" => BaseCodeKind::Rs,
-                            _ => return Err("unknown backend".into()),
-                        };
-                        let config = if args.quick {
-                            if ![2usize, 4, 8].contains(&r) {
-                                return Err("invalid arity".into());
-                            }
-                            let mu0 = 2 + (mu - 2) % (r.ilog2() as usize);
-                            HyperFoldConfig::testing(
-                                field,
-                                backend,
-                                mu,
-                                mu0,
-                                r,
-                                c,
-                                if field == BaseFieldKind::Goldilocks {
-                                    3
-                                } else {
-                                    2
-                                },
-                            )?
-                        } else {
-                            HyperFoldConfig::experiment(field, backend, mu, r, c)?
-                        };
-                        cases.push(config);
-                    }
-                }
-            }
-        }
-    }
+    let cases = configs(&args)?;
     if args.list {
-        println!(
-            "field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory{}",
-            strategy_header(&args)
-        );
+        println!("{ID}");
         for c in cases {
-            let estimate = if args.first_tree_strategy.is_some() {
-                String::new()
-            } else {
-                format!("{:.3}", estimated_gib(c, low_memory(c, &args)))
-            };
-            let suffix = strategy_suffix(&args, "");
-            println!(
-                "{},{},{},{},{estimate},{},{}{suffix}",
-                name(c),
-                c.mu0,
-                c.extension_degree,
-                c.num_queries,
-                c.certified,
-                low_memory(c, &args)
-            );
+            println!("{}", identity(c, &args).join(","))
         }
         return Ok(());
     }
-    let completed = if args.resume && args.output.exists() {
-        std::fs::read_to_string(&args.output)?
-            .lines()
-            .skip(1)
-            .filter_map(|l| {
-                let p: Vec<_> = l.split(',').collect();
-                if p.len() > 5 && p[5] == "measured" {
-                    Some(p[..5].join(","))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let (mut results, mut raw) = prepare_outputs(&args)?;
-    let pool = rayon::ThreadPoolBuilder::new()
+    let (mut summary, mut raw) = outputs(args.output.as_ref().unwrap())?;
+    rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
-        .build()?;
-    for config in cases {
-        if completed.contains(&name(config)) {
-            continue;
-        }
-        let low = low_memory(config, &args);
-        let gib = estimated_gib(config, low);
-        if args.first_tree_strategy.is_none() && gib > args.max_estimated_gib {
-            writeln!(
-                results,
-                "{},skipped_memory,{},{},{},{},{},,,,,,,,{gib:.3},{},{low},",
-                name(config),
-                config.mu0,
-                config.extension_degree,
-                config.num_queries,
-                args.threads,
-                args.repetitions,
-                if config.certified {
-                    "certified_conservative_IOP_100_not_FS"
-                } else {
-                    "functional_only"
-                }
-            )?;
-            results.flush()?;
-            eprintln!("skipped {} estimated {gib:.1} GiB", name(config));
-            continue;
-        }
-        eprintln!(
-            "running {} threads={} estimate_model={} strategy={}",
-            name(config),
-            args.threads,
-            if args.first_tree_strategy.is_some() {
-                "not_available".to_string()
-            } else {
-                format!("{gib:.3}GiB")
-            },
-            if args.first_tree_strategy.is_some() {
-                "prehashed_recovered"
-            } else {
-                "legacy"
-            }
-        );
-        let measured = pool.install(|| match config.base_field {
-            BaseFieldKind::Goldilocks => {
-                run::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>(config, &args, &mut raw)
-            }
-            BaseFieldKind::M127 => run::<Mersenne127, M127Quad>(config, &args, &mut raw),
-        });
-        match measured {
-            Ok((ct, ot, vt, cb, pb, dt, fingerprint)) => {
-                let total = cb + pb;
-                let suffix = strategy_suffix(&args, &fingerprint);
-                let estimate = if args.first_tree_strategy.is_some() {
-                    String::new()
-                } else {
-                    format!("{gib:.3}")
-                };
-                writeln!(
-                    results,
-                    "{},measured,{},{},{},{},{},{ct:.6},{ot:.6},{vt:.6},{cb},{pb},{total},{:.6},{estimate},{},{low},{dt:.6}{suffix}",
-                    name(config),
-                    config.mu0,
-                    config.extension_degree,
-                    config.num_queries,
-                    args.threads,
-                    args.repetitions,
-                    total as f64 / 1024.0,
-                    if config.certified {
-                        "certified_conservative_IOP_100_not_FS"
-                    } else {
-                        "functional_only"
+        .build()?
+        .install(|| {
+            for c in cases {
+                match c.base_field {
+                    BaseFieldKind::Goldilocks => run::<
+                        Goldilocks,
+                        CubicTrinomialExtensionField<Goldilocks>,
+                    >(
+                        c, &args, &mut summary, &mut raw
+                    )?,
+                    BaseFieldKind::M127 => {
+                        run::<Mersenne127, M127Quad>(c, &args, &mut summary, &mut raw)?
                     }
-                )?;
-                results.flush()?;
-                println!(
-                    "{} commit={ct:.3}ms open={ot:.3}ms verify={vt:.3}ms proof={total}B",
-                    name(config)
-                );
+                }
             }
-            Err(e) => {
-                results.flush()?;
-                return Err(e);
-            }
-        }
-    }
-    eprintln!(
-        "results: {} (certificate {})",
-        args.output.display(),
-        params::CERTIFICATE_VERSION
-    );
-    Ok(())
+            Ok(())
+        })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn recovered_requires_explicit_retained_fresh_output_and_labels_schema() {
-        let legacy = Args::try_parse_from(["bench"]).unwrap();
-        assert!(validate_modes(&legacy).is_ok());
-        assert_eq!(strategy_header(&legacy), "");
-        assert_eq!(strategy_suffix(&legacy, "x"), "");
-        for mode in ["auto", "low"] {
-            let args = Args::try_parse_from([
-                "bench",
-                "--memory-mode",
-                mode,
-                "--first-tree-strategy",
-                "recovered",
-            ])
-            .unwrap();
-            assert!(validate_modes(&args).is_err());
+    fn selection_and_removed_flags() {
+        let args = Args::try_parse_from(["bench", "--list"]).unwrap();
+        assert_eq!(configs(&args).unwrap().len(), 144);
+        assert_eq!(mus("20..=30").unwrap(), vec![20, 22, 24, 26, 28, 30]);
+        assert!(mus("30..=20").is_err());
+        for legacy in [
+            vec!["--resume"],
+            vec!["--memory-mode", "retained"],
+            vec!["--max-estimated-gib", "64"],
+            vec!["--first-tree-strategy", "recovered"],
+        ] {
+            let mut argv = vec!["bench", "--list"];
+            argv.extend(legacy);
+            assert!(Args::try_parse_from(argv).is_err());
         }
-        let args = Args::try_parse_from([
-            "bench",
-            "--memory-mode",
-            "retained",
-            "--first-tree-strategy",
-            "recovered",
-        ])
-        .unwrap();
-        assert!(validate_modes(&args).is_ok());
-        assert_eq!(
-            strategy_suffix(&args, "abc"),
-            ",prehashed_recovered,retained_both,abc"
-        );
-        let mut args = args;
-        args.resume = true;
-        assert!(validate_modes(&args).is_err());
+        let args = Args::try_parse_from(["bench", "--list", "--threads", "1"]).unwrap();
+        assert!(configs(&args).is_err());
     }
     #[test]
-    fn recovered_existing_summary_or_raw_is_never_modified() {
+    fn old_outputs_are_unchanged() {
         for (index, which) in ["summary", "raw", "both"].iter().enumerate() {
-            let directory = std::env::temp_dir().join(format!(
-                "hyperfold-fresh-output-{}-{index}",
+            let dir = std::env::temp_dir().join(format!(
+                "hyperfold-one-shot-output-{}-{index}",
                 std::process::id()
             ));
-            std::fs::create_dir(&directory).unwrap();
-            let path = directory.join("results.csv");
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("results.csv");
             let raw = path.with_extension("raw.csv");
             if *which != "raw" {
-                std::fs::write(&path, b"original-summary\n").unwrap();
+                std::fs::write(&path, b"old-summary\n").unwrap()
             }
             if *which != "summary" {
-                std::fs::write(&raw, b"original-raw\n").unwrap();
+                std::fs::write(&raw, b"old-raw\n").unwrap()
             }
-            let args = Args::try_parse_from([
-                "bench",
-                "--memory-mode",
-                "retained",
-                "--first-tree-strategy",
-                "recovered",
-                "--output",
-                path.to_str().unwrap(),
-            ])
-            .unwrap();
-            assert!(prepare_outputs(&args).is_err());
+            assert!(outputs(&path).is_err());
             if *which != "raw" {
-                assert_eq!(std::fs::read(&path).unwrap(), b"original-summary\n");
+                assert_eq!(std::fs::read(&path).unwrap(), b"old-summary\n")
             } else {
-                assert!(!path.exists());
+                assert!(!path.exists())
             }
             if *which != "summary" {
-                assert_eq!(std::fs::read(&raw).unwrap(), b"original-raw\n");
+                assert_eq!(std::fs::read(&raw).unwrap(), b"old-raw\n")
             } else {
-                assert!(!raw.exists());
+                assert!(!raw.exists())
             }
-            // Test the atomic safeguard independently of the pair preflight.
-            let occupied = if *which == "raw" { &raw } else { &path };
-            assert!(output(occupied, false, "replacement", true).is_err());
-            std::fs::remove_dir_all(directory).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
         }
-    }
-    #[test]
-    fn ranges_and_resource_estimate() {
-        assert_eq!(mus("20..=30").unwrap(), vec![20, 22, 24, 26, 28, 30]);
-        assert_eq!(mus("20,24").unwrap(), vec![20, 24]);
-        assert!(mus("30..=20").is_err());
-        assert!(mus("20..=100").is_err());
-        let c =
-            HyperFoldConfig::experiment(BaseFieldKind::M127, BaseCodeKind::Rs, 30, 2, 4).unwrap();
-        assert!(estimated_gib(c, false) > 500.0);
     }
 }
