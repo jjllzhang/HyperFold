@@ -1,0 +1,21 @@
+[package]
+name = "hyperfold-m127-compare"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hyperfold-pcs = { path = "../.." }
+p3-field = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/field" }
+ark-ff = { version = "=0.6.0", features = ["std", "asm"] }
+num-bigint = "0.5.1"
+rayon = "1.12"
+clap = { version = "4.6", features = ["derive"] }
+blake3 = "1.8.4"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
