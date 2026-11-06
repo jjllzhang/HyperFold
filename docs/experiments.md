@@ -241,3 +241,35 @@ comparison; the sub-timing is not an isolated row-fold arithmetic measurement.
 The completed [18-process / 54-sample report](../experiments/query-rows-2026-11-06/REPORT.md)
 contains every process mean and within-/across-process variation, constructor
 contrasts, RSS, raw archive and an archive-only numeric analysis helper.
+
+## Formal queried-row attempts at the two largest configurations
+
+The v1.1 plan supplement (§9) fixes the full lifecycle: Setup once, one warmup
+plus three measured repetitions, with a fresh commitment in every repetition.
+The formal CLI accepts `--first-tree-strategy recovered` only with explicit
+`--memory-mode retained` and without `--resume`. It retains both Setup directions,
+never switches to whole-tree rebuilding, and appends
+`first_tree_strategy=prehashed_recovered`, `diagonal_storage=retained_both` and a
+commitment/proof/post-challenge fingerprint to the new mode's CSVs. Legacy default
+CSV schemas remain unchanged. Repetitions must verify and agree on transcript and
+fingerprint before raw data is written.
+
+The existing estimator does not model queried-row storage: the new mode leaves
+`estimated_gib` blank and bypasses estimate exclusions. Its peak RSS must be measured.
+`attempt_query_extremes.py` copies a pinned binary into a new empty evidence
+folder and runs QA/RS sequentially with no active available-memory termination.
+It uses immutable command contracts and records RSS/HWM, MemAvailable, swap and
+global OOM counters. Explicit cancellation is still honored through `policy.json`.
+It does not alter swap/cgroup/kernel settings or the original 142-case data.
+
+```sh
+RUSTFLAGS='-C target-cpu=native' cargo build --offline --locked --release --bin bench
+python3 scripts/attempt_query_extremes.py --binary target/release/bench \
+  --root /tmp/hyperfold-recovered-extremes-new-empty
+```
+
+For an inexpensive full-lifecycle smoke check, add `--mu 20`. Actual μ30 failures
+retain all partial CSVs and real exit/resource records; aggregate timing/size fields
+remain blank unless all three repetitions complete. `runtime_failed` does not
+imply a kernel-confirmed per-process OOM. Query recovery is labeled separately from
+native retention and prior whole-tree rebuilding results.

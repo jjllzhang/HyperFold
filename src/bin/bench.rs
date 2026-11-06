@@ -5,7 +5,7 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{self, BaseCodeKind, BaseFieldKind, HyperFoldConfig},
-    pcs::{HyperFoldPcs, OpenOptions},
+    pcs::{FirstTreeStrategy, HyperFoldPcs, OpenOptions},
     resources::estimated_gib,
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
@@ -54,6 +54,32 @@ struct Args {
     /// auto selects low-memory only when retained storage exceeds the ceiling.
     #[arg(long, default_value="auto", value_parser=["auto", "retained", "low"])]
     memory_mode: String,
+    /// Explicit queried-row strategy; requires retained memory mode and a new output.
+    /// No estimate model or estimate-only exclusion is applied to this strategy.
+    #[arg(long, value_parser=["recovered"])]
+    first_tree_strategy: Option<String>,
+}
+fn validate_modes(args: &Args) -> Result<(), &'static str> {
+    if args.first_tree_strategy.is_some() && (args.memory_mode != "retained" || args.resume) {
+        return Err(
+            "recovered requires explicit --memory-mode retained and a fresh output (no --resume)",
+        );
+    }
+    Ok(())
+}
+fn strategy_suffix(args: &Args, fingerprint: &str) -> String {
+    if args.first_tree_strategy.is_some() {
+        format!(",prehashed_recovered,retained_both,{fingerprint}")
+    } else {
+        String::new()
+    }
+}
+fn strategy_header(args: &Args) -> &'static str {
+    if args.first_tree_strategy.is_some() {
+        ",first_tree_strategy,diagonal_storage,fingerprint"
+    } else {
+        ""
+    }
 }
 fn mus(input: &str) -> Result<Vec<usize>, String> {
     if let Some((a, b)) = input.split_once("..=") {
@@ -100,7 +126,7 @@ fn output(path: &PathBuf, resume: bool, header: &str) -> std::io::Result<BufWrit
     }
     Ok(w)
 }
-type Measurements = (f64, f64, f64, usize, usize, f64);
+type Measurements = (f64, f64, f64, usize, usize, f64, String);
 type BenchError = Box<dyn std::error::Error + Send + Sync>;
 fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
     config: HyperFoldConfig,
@@ -118,6 +144,8 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
     let mut sum = [0.0; 3];
     let mut transition_sum = 0.0;
     let mut bytes = (0, 0);
+    let mut reference_fingerprint = None;
+    let mut fingerprint = String::new();
     for repetition in 0..=args.repetitions {
         let mut rng = stream(&[27; 32], b"benchmark-message", config.mu as u64);
         let message: Vec<F> = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
@@ -138,25 +166,48 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
         pcs.prepare_open();
         let transition_ms = (commit_transition + start.elapsed()).as_secs_f64() * 1000.0;
         let start = Instant::now();
-        let (proof, mut prover) = pcs.open_with_options(
-            &cm,
-            &data,
-            &z,
-            y,
-            OpenOptions {
-                recompute_first_tree: low,
-            },
-        )?;
+        let (proof, mut prover) = if args.first_tree_strategy.is_some() {
+            assert!(pcs.diagonals.has_forward() && pcs.diagonals.has_inverse());
+            pcs.open_with_strategy(&cm, &data, &z, y, FirstTreeStrategy::PrehashedRecovered)?
+        } else {
+            pcs.open_with_options(
+                &cm,
+                &data,
+                &z,
+                y,
+                OpenOptions {
+                    recompute_first_tree: low,
+                },
+            )?
+        };
         let open = start.elapsed().as_secs_f64() * 1000.0;
         let start = Instant::now();
         let mut verifier = pcs.verify(&cm, &z, y, &proof)?;
         let verify = start.elapsed().as_secs_f64() * 1000.0;
-        if prover.sample::<F, E>(b"post-benchmark-agreement")
-            != verifier.sample::<F, E>(b"post-benchmark-agreement")
-        {
+        let challenge = prover.sample::<F, E>(b"post-benchmark-agreement");
+        if challenge != verifier.sample::<F, E>(b"post-benchmark-agreement") {
             return Err("transcript disagreement".into());
         }
-        let sizes = (codec::encode(&cm)?.len(), codec::encode(&proof)?.len());
+        let cm_bytes = codec::encode(&cm)?;
+        let proof_bytes = codec::encode(&proof)?;
+        let sizes = (cm_bytes.len(), proof_bytes.len());
+        if args.first_tree_strategy.is_some() {
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"hyperfold-formal-recovered-bench-v1");
+            hash.update(&(cm_bytes.len() as u64).to_le_bytes());
+            hash.update(&cm_bytes);
+            hash.update(&proof_bytes);
+            hash.update(&codec::encode(&challenge)?);
+            let current = hash.finalize();
+            if let Some(expected) = reference_fingerprint {
+                if current != expected {
+                    return Err("non-deterministic proof/transcript fingerprint".into());
+                }
+            } else {
+                reference_fingerprint = Some(current);
+            }
+            fingerprint = current.to_hex().to_string();
+        }
         if repetition > 0 {
             if repetition > 1 && sizes != bytes {
                 return Err("non-deterministic proof size".into());
@@ -166,21 +217,30 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
             for (acc, v) in sum.iter_mut().zip([commit, open, verify]) {
                 *acc += v;
             }
+            let estimate = if args.first_tree_strategy.is_some() {
+                String::new()
+            } else {
+                format!("{:.9}", estimated_gib(config, low))
+            };
+            let suffix = strategy_suffix(args, &fingerprint);
             writeln!(
                 raw,
-                "{},{},{},{},{},{},{:.9},{commit:.6},{open:.6},{verify:.6},{},{},{setup_ms:.6},{low},{transition_ms:.6}",
+                "{},{},{},{},{},{},{estimate},{commit:.6},{open:.6},{verify:.6},{},{},{setup_ms:.6},{low},{transition_ms:.6}{suffix}",
                 name(config),
                 config.mu0,
                 config.extension_degree,
                 config.num_queries,
                 repetition,
                 config.certified,
-                estimated_gib(config, low),
                 sizes.0,
                 sizes.1
             )?;
             raw.flush()?;
         }
+    }
+    // Both Setup directions must remain live even through the final recovered opening.
+    if args.first_tree_strategy.is_some() {
+        std::hint::black_box(&pcs);
     }
     Ok((
         sum[0] / args.repetitions as f64,
@@ -189,10 +249,12 @@ fn run<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>(
         bytes.0,
         bytes.1,
         transition_sum / args.repetitions as f64,
+        fingerprint,
     ))
 }
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
+    validate_modes(&args)?;
     if args.threads == 0
         || args.repetitions == 0
         || !args.max_estimated_gib.is_finite()
@@ -246,16 +308,22 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if args.list {
         println!(
-            "field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory"
+            "field,backend,mu,r,c,mu0,extension_degree,queries,estimated_gib,certified_iop,low_memory{}",
+            strategy_header(&args)
         );
         for c in cases {
+            let estimate = if args.first_tree_strategy.is_some() {
+                String::new()
+            } else {
+                format!("{:.3}", estimated_gib(c, low_memory(c, &args)))
+            };
+            let suffix = strategy_suffix(&args, "");
             println!(
-                "{},{},{},{},{:.3},{},{}",
+                "{},{},{},{},{estimate},{},{}{suffix}",
                 name(c),
                 c.mu0,
                 c.extension_degree,
                 c.num_queries,
-                estimated_gib(c, low_memory(c, &args)),
                 c.certified,
                 low_memory(c, &args)
             );
@@ -281,12 +349,18 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut results = output(
         &args.output,
         args.resume,
-        "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms",
+        &format!(
+            "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms{}",
+            strategy_header(&args)
+        ),
     )?;
     let mut raw = output(
         &args.output.with_extension("raw.csv"),
         args.resume,
-        "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms",
+        &format!(
+            "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms{}",
+            strategy_header(&args)
+        ),
     )?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
@@ -297,7 +371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         let low = low_memory(config, &args);
         let gib = estimated_gib(config, low);
-        if gib > args.max_estimated_gib {
+        if args.first_tree_strategy.is_none() && gib > args.max_estimated_gib {
             writeln!(
                 results,
                 "{},skipped_memory,{},{},{},{},{},,,,,,,,{gib:.3},{},{low},",
@@ -318,9 +392,19 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             continue;
         }
         eprintln!(
-            "running {} threads={} estimated={gib:.3}GiB",
+            "running {} threads={} estimate_model={} strategy={}",
             name(config),
-            args.threads
+            args.threads,
+            if args.first_tree_strategy.is_some() {
+                "not_available".to_string()
+            } else {
+                format!("{gib:.3}GiB")
+            },
+            if args.first_tree_strategy.is_some() {
+                "prehashed_recovered"
+            } else {
+                "legacy"
+            }
         );
         let measured = pool.install(|| match config.base_field {
             BaseFieldKind::Goldilocks => {
@@ -329,11 +413,17 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             BaseFieldKind::M127 => run::<Mersenne127, M127Quad>(config, &args, &mut raw),
         });
         match measured {
-            Ok((ct, ot, vt, cb, pb, dt)) => {
+            Ok((ct, ot, vt, cb, pb, dt, fingerprint)) => {
                 let total = cb + pb;
+                let suffix = strategy_suffix(&args, &fingerprint);
+                let estimate = if args.first_tree_strategy.is_some() {
+                    String::new()
+                } else {
+                    format!("{gib:.3}")
+                };
                 writeln!(
                     results,
-                    "{},measured,{},{},{},{},{},{ct:.6},{ot:.6},{vt:.6},{cb},{pb},{total},{:.6},{gib:.3},{},{low},{dt:.6}",
+                    "{},measured,{},{},{},{},{},{ct:.6},{ot:.6},{vt:.6},{cb},{pb},{total},{:.6},{estimate},{},{low},{dt:.6}{suffix}",
                     name(config),
                     config.mu0,
                     config.extension_degree,
@@ -370,6 +460,40 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovered_requires_explicit_retained_fresh_output_and_labels_schema() {
+        let legacy = Args::try_parse_from(["bench"]).unwrap();
+        assert!(validate_modes(&legacy).is_ok());
+        assert_eq!(strategy_header(&legacy), "");
+        assert_eq!(strategy_suffix(&legacy, "x"), "");
+        for mode in ["auto", "low"] {
+            let args = Args::try_parse_from([
+                "bench",
+                "--memory-mode",
+                mode,
+                "--first-tree-strategy",
+                "recovered",
+            ])
+            .unwrap();
+            assert!(validate_modes(&args).is_err());
+        }
+        let args = Args::try_parse_from([
+            "bench",
+            "--memory-mode",
+            "retained",
+            "--first-tree-strategy",
+            "recovered",
+        ])
+        .unwrap();
+        assert!(validate_modes(&args).is_ok());
+        assert_eq!(
+            strategy_suffix(&args, "abc"),
+            ",prehashed_recovered,retained_both,abc"
+        );
+        let mut args = args;
+        args.resume = true;
+        assert!(validate_modes(&args).is_err());
+    }
     #[test]
     fn ranges_and_resource_estimate() {
         assert_eq!(mus("20..=30").unwrap(), vec![20, 22, 24, 26, 28, 30]);
