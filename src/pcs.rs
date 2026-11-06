@@ -3,7 +3,7 @@
 //! public-seed Setup, Merkle and implementation security are not established here.
 use crate::{
     base_code::{BaseCode, BaseCodeImpl},
-    encoder::{beta, encode_top, fold_level, fold_row},
+    encoder::{RecoveredFirstMatrix, beta, encode_top, fold_level, fold_row},
     matrix_h::LocalMatrix,
     mmcs::{self, Digest, Opening, Tree},
     params::{DiagonalTables, Error, HyperFoldConfig, Result},
@@ -16,6 +16,7 @@ use p3_commit::Mmcs;
 use p3_field::{AlgebraIdentity, BasedVectorSpace, ExtensionField};
 use p3_merkle_tree::PrunedMerklePaths;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(
@@ -58,6 +59,22 @@ pub struct Proof<F, E> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenOptions {
     pub recompute_first_tree: bool,
+}
+/// Mutually exclusive first-intermediate-tree storage strategies. The default
+/// public opening API retains the original native tree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FirstTreeStrategy {
+    #[default]
+    NativeRetained,
+    Rebuild,
+    PrehashedRetained,
+    PrehashedRecovered,
+}
+/// Optional coarse profiling: one timer for the first tree's query extraction,
+/// including row recovery (if selected), multiproof extraction and compression.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenTimings {
+    pub first_tree_query: Duration,
 }
 #[derive(Debug)]
 pub struct HyperFoldPcs<F, E> {
@@ -180,6 +197,47 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         y: E,
         options: OpenOptions,
     ) -> Result<(Proof<F, E>, Transcript)> {
+        let strategy = if options.recompute_first_tree {
+            FirstTreeStrategy::Rebuild
+        } else {
+            FirstTreeStrategy::NativeRetained
+        };
+        self.open_internal(cm, data, z, y, strategy, None)
+    }
+    /// Open with a typed storage strategy, without profiling clocks.
+    pub fn open_with_strategy(
+        &self,
+        cm: &Commitment<E>,
+        data: &CommitData<F>,
+        z: &[E],
+        y: E,
+        strategy: FirstTreeStrategy,
+    ) -> Result<(Proof<F, E>, Transcript)> {
+        self.open_internal(cm, data, z, y, strategy, None)
+    }
+    /// Diagnostics only: all clocks and extraction work remain inside open time.
+    pub fn open_profiled(
+        &self,
+        cm: &Commitment<E>,
+        data: &CommitData<F>,
+        z: &[E],
+        y: E,
+        strategy: FirstTreeStrategy,
+    ) -> Result<(Proof<F, E>, Transcript, OpenTimings)> {
+        let mut timings = OpenTimings::default();
+        let (proof, transcript) =
+            self.open_internal(cm, data, z, y, strategy, Some(&mut timings))?;
+        Ok((proof, transcript, timings))
+    }
+    fn open_internal(
+        &self,
+        cm: &Commitment<E>,
+        data: &CommitData<F>,
+        z: &[E],
+        y: E,
+        strategy: FirstTreeStrategy,
+        mut timings: Option<&mut OpenTimings>,
+    ) -> Result<(Proof<F, E>, Transcript)> {
         if !self.diagonals.has_inverse() {
             return Err(Error::Config("call prepare_open for inverse diagonals"));
         }
@@ -196,6 +254,8 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let mut roots = Vec::with_capacity(d - 1);
         let mut running = cm.y0 + gamma * y;
         let mut first_beta = None;
+        let mut first_dense = None;
+        let mut recovered_tree = None;
         for i in (1..=d).rev() {
             let stride = config.k0() * (1 << ((i - 1) * config.nu()));
             let mut level = Vec::with_capacity(config.nu());
@@ -234,6 +294,8 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 let next = if i == d {
                     let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
+                } else if let Some(matrix) = first_dense.as_ref() {
+                    fold_level(config, &self.h, &self.diagonals, matrix, i, &b)
                 } else {
                     let matrices = mmcs::mmcs::<E>().get_matrices(
                         trees
@@ -243,14 +305,41 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                     );
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 };
-                if options.recompute_first_tree && trees.len() == 1 {
+                // The successor matrix is complete; release the sole dense owner
+                // before committing the next tree. No descriptor borrows it.
+                first_dense = None;
+                if strategy == FirstTreeStrategy::Rebuild && trees.len() == 1 {
                     // Its matrix was needed above; drop it before building the second tree.
                     trees[0] = None;
                 }
-                let (root, tree) = mmcs::commit(next);
+                let first = trees.is_empty();
+                let (root, tree) = if first && strategy == FirstTreeStrategy::PrehashedRecovered {
+                    let digests = mmcs::hash_leaves(&next);
+                    let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
+                    let matrix = RecoveredFirstMatrix::new(
+                        config,
+                        matrices[0],
+                        &self.h,
+                        &self.diagonals.levels[d - 1].inverse,
+                        b,
+                    );
+                    let (root, lazy) = mmcs::commit_prehashed(matrix, digests);
+                    recovered_tree = Some(lazy);
+                    if d >= 3 {
+                        first_dense = Some(next);
+                    } // d=2: release now.
+                    (root, None)
+                } else if first && strategy == FirstTreeStrategy::PrehashedRetained {
+                    let digests = mmcs::hash_leaves(&next);
+                    let (root, tree) = mmcs::commit_prehashed(next, digests);
+                    (root, Some(tree))
+                } else {
+                    let (root, tree) = mmcs::commit(next);
+                    (root, Some(tree))
+                };
                 t.observe(b"folded-root", &root);
                 roots.push(root);
-                trees.push(Some(tree));
+                trees.push(tree);
             } else {
                 t.observe(b"final-table", &f);
             }
@@ -263,12 +352,10 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let top_indices = project(&queries, config.n(d - 1));
         let top = mmcs::open(&data.tree, &top_indices);
         let mut inner: Vec<Option<CompressedOpening<E>>> = (0..d - 1).map(|_| None).collect();
-        let compress = |pos: usize, tree: &Tree<E>| {
+        let compress_opening = |pos: usize, indices: &[usize], o: Opening<E>| {
             let i = d - 1 - pos;
             let np = config.n(i - 1);
             let prev = project(&queries, config.n(i));
-            let indices = project(&queries, np);
-            let o = mmcs::open(tree, &indices);
             let mut rows = o.rows;
             for (j, row) in indices.iter().zip(&mut rows) {
                 let p = *prev
@@ -287,10 +374,15 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         // peak while all smaller trees were still live.
         for (pos, tree) in trees.into_iter().enumerate() {
             if let Some(tree) = tree {
-                inner[pos] = Some(compress(pos, &tree));
+                let start = (pos == 0 && timings.is_some()).then(Instant::now);
+                let indices = project(&queries, config.n(d - 2 - pos));
+                inner[pos] = Some(compress_opening(pos, &indices, mmcs::open(&tree, &indices)));
+                if let Some(start) = start {
+                    timings.as_mut().unwrap().first_tree_query = start.elapsed();
+                }
             } else {
                 assert_eq!(pos, 0);
-                rebuild = true;
+                rebuild = recovered_tree.is_none();
             }
         }
         if rebuild {
@@ -307,7 +399,20 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             if root != roots[0] {
                 return Err(Error::Proof("reconstructed tree root"));
             }
-            inner[0] = Some(compress(0, &tree));
+            let start = timings.is_some().then(Instant::now);
+            let indices = project(&queries, config.n(d - 2));
+            inner[0] = Some(compress_opening(0, &indices, mmcs::open(&tree, &indices)));
+            if let Some(start) = start {
+                timings.as_mut().unwrap().first_tree_query = start.elapsed();
+            }
+        }
+        if let Some(tree) = recovered_tree {
+            let start = timings.is_some().then(Instant::now);
+            let indices = project(&queries, config.n(d - 2));
+            inner[0] = Some(compress_opening(0, &indices, mmcs::open(&tree, &indices)));
+            if let Some(start) = start {
+                timings.as_mut().unwrap().first_tree_query = start.elapsed();
+            }
         }
         let inner = inner
             .into_iter()

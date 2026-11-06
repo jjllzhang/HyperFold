@@ -147,6 +147,71 @@ pub fn fold_level<F: Field, T: Field + Algebra<F>, E: Field + Algebra<T>>(
         });
     RowMajorMatrix::new(out, width)
 }
+/// Borrow only the retained top codeword and folding parameters; never owns or
+/// caches the first intermediate dense codeword. Rows are natural physical rows.
+#[derive(Debug)]
+pub struct RecoveredFirstMatrix<'a, F, E> {
+    top: &'a RowMajorMatrix<F>,
+    h: &'a LocalMatrix<F>,
+    inverse: &'a [F],
+    beta: [E; 8],
+    height: usize,
+    #[cfg(test)]
+    reads: Option<&'a std::sync::atomic::AtomicUsize>,
+}
+impl<'a, F: Field, E: Field + Algebra<F>> RecoveredFirstMatrix<'a, F, E> {
+    pub fn new(
+        config: HyperFoldConfig,
+        top: &'a RowMajorMatrix<F>,
+        h: &'a LocalMatrix<F>,
+        inverse: &'a [F],
+        beta: [E; 8],
+    ) -> Self {
+        assert!(config.depth() >= 2);
+        assert_eq!(top.width, config.r);
+        assert_eq!(top.values.len(), config.n(config.depth()));
+        assert_eq!(inverse.len(), config.n(config.depth() - 1) * (config.r - 1));
+        Self {
+            top,
+            h,
+            inverse,
+            beta,
+            height: config.n(config.depth() - 2),
+            #[cfg(test)]
+            reads: None,
+        }
+    }
+}
+impl<F: Field, E: Field + Algebra<F>> p3_matrix::Matrix<E> for RecoveredFirstMatrix<'_, F, E> {
+    fn width(&self) -> usize {
+        self.h.r
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    unsafe fn row_unchecked(
+        &self,
+        j: usize,
+    ) -> impl IntoIterator<Item = E, IntoIter = impl Iterator<Item = E> + Send + Sync> {
+        // Matrix's safe row() bounds j. All indexing here remains checked.
+        #[cfg(test)]
+        if let Some(reads) = self.reads {
+            reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let r = self.h.r;
+        let mut row = [E::ZERO; 8];
+        for (b, value) in row[..r].iter_mut().enumerate() {
+            let q = j + b * self.height;
+            *value = fold_row(
+                self.h,
+                &self.inverse[q * (r - 1)..(q + 1) * (r - 1)],
+                &self.beta,
+                &self.top.values[q * r..(q + 1) * r],
+            );
+        }
+        row.into_iter().take(r)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +222,141 @@ mod tests {
     };
     use p3_field::extension::CubicTrinomialExtensionField;
     use p3_goldilocks::Goldilocks;
+    #[test]
+    fn recovered_first_rows_match_dense_and_only_queries_are_read() {
+        use p3_field::ExtensionField;
+        use p3_matrix::Matrix;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        fn check<F: SampleBase, E: ExtensionField<F>>() {
+            let mut rng = stream(&[93; 32], b"query-row-reference", 0);
+            for r in [2usize, 4, 8] {
+                for c in [2, 4] {
+                    for depth in [2, 3, 4] {
+                        for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                            let config = HyperFoldConfig::testing(
+                                F::KIND,
+                                backend,
+                                2 + depth * r.ilog2() as usize,
+                                2,
+                                r,
+                                c,
+                                E::DIMENSION,
+                            )
+                            .unwrap();
+                            let base = BaseCodeImpl::new(config, &[44; 32]).unwrap();
+                            let h = LocalMatrix::new(r);
+                            let diags = DiagonalTables::new(config, &[44; 32]);
+                            let msg: Vec<F> =
+                                (0..config.k()).map(|_| F::sample(&mut rng)).collect();
+                            let top = encode_top(config, &base, &h, &diags, &msg, depth);
+                            let alphas: Vec<E> =
+                                (0..config.nu()).map(|j| E::from_usize(j + 17)).collect();
+                            let b = beta(&alphas);
+                            let dense = fold_level(config, &h, &diags, &top, depth, &b);
+                            let mut lazy = RecoveredFirstMatrix::new(
+                                config,
+                                &top,
+                                &h,
+                                &diags.levels[depth - 1].inverse,
+                                b,
+                            );
+                            let reads = AtomicUsize::new(0);
+                            lazy.reads = Some(&reads);
+                            for j in 0..dense.height() {
+                                assert_eq!(
+                                    lazy.row(j).unwrap().into_iter().collect::<Vec<_>>(),
+                                    dense.row(j).unwrap().into_iter().collect::<Vec<_>>()
+                                );
+                            }
+                            assert!(lazy.row(lazy.height()).is_none());
+                            let hashes = crate::mmcs::hash_leaves(&dense);
+                            let (root, native) = crate::mmcs::commit(dense.clone());
+                            let mut indices =
+                                vec![0, 1, 2, lazy.height() / 2, lazy.height() - 1, 1];
+                            indices.sort_unstable();
+                            indices.dedup();
+                            let expected = crate::mmcs::open(&native, &indices);
+                            drop(native);
+                            drop(dense); // Neither descriptor nor hash tree owns the dense codeword.
+                            reads.store(0, Ordering::Relaxed);
+                            let (other, tree) = crate::mmcs::commit_prehashed(lazy, hashes);
+                            assert_eq!(root, other);
+                            assert_eq!(reads.load(Ordering::Relaxed), 0); // Constructor never enumerates lazy rows.
+                            let opening = crate::mmcs::open(&tree, &indices);
+                            assert_eq!(reads.load(Ordering::Relaxed), indices.len());
+                            assert_eq!(
+                                crate::codec::encode(&expected).unwrap(),
+                                crate::codec::encode(&opening).unwrap()
+                            );
+                            crate::mmcs::verify(
+                                root,
+                                config.n(depth - 2),
+                                r,
+                                &indices,
+                                &opening.rows,
+                                &opening.paths,
+                            )
+                            .unwrap();
+                            let mut bad = opening.rows.clone();
+                            bad[0][0] += E::ONE;
+                            assert!(
+                                crate::mmcs::verify(
+                                    root,
+                                    config.n(depth - 2),
+                                    r,
+                                    &indices,
+                                    &bad,
+                                    &opening.paths
+                                )
+                                .is_err()
+                            );
+                            let mut swapped = opening.rows.clone();
+                            swapped.swap(0, 1);
+                            assert!(
+                                crate::mmcs::verify(
+                                    root,
+                                    config.n(depth - 2),
+                                    r,
+                                    &indices,
+                                    &swapped,
+                                    &opening.paths
+                                )
+                                .is_err()
+                            );
+                            let mut swapped = opening.rows.clone();
+                            swapped[0].swap(0, 1);
+                            assert!(
+                                crate::mmcs::verify(
+                                    root,
+                                    config.n(depth - 2),
+                                    r,
+                                    &indices,
+                                    &swapped,
+                                    &opening.paths
+                                )
+                                .is_err()
+                            );
+                            let mut bad = opening.paths.clone();
+                            bad.sibling_hashes[0][0] ^= 1;
+                            assert!(
+                                crate::mmcs::verify(
+                                    root,
+                                    config.n(depth - 2),
+                                    r,
+                                    &indices,
+                                    &opening.rows,
+                                    &bad
+                                )
+                                .is_err()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check::<Mersenne127, M127Quad>();
+    }
     fn logical<T: Field>(m: &RowMajorMatrix<T>, r: usize) -> Vec<T> {
         if r == 1 {
             return m.values.clone();

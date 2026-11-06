@@ -3,9 +3,10 @@
 use crate::params::{Error, Result};
 use p3_commit::Mmcs;
 use p3_field::Field;
-use p3_matrix::{Dimensions, dense::RowMajorMatrix};
+use p3_matrix::{Dimensions, Matrix, dense::RowMajorMatrix};
 use p3_merkle_tree::{MerkleTree, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::{CryptographicHasher, MerkleCap, PseudoCompressionFunction};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 pub type Digest = [u8; 32];
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +64,28 @@ pub struct Opening<T> {
     pub rows: Vec<Vec<T>>,
     pub paths: PrunedMerklePaths<u8, 32>,
 }
-pub fn open<T: Field>(tree: &Tree<T>, indices: &[usize]) -> Opening<T> {
+/// Hash canonical physical rows in parallel, once, for both prehashed strategies.
+pub fn hash_leaves<T: Field>(matrix: &RowMajorMatrix<T>) -> Vec<Digest> {
+    matrix
+        .values
+        .par_chunks_exact(matrix.width)
+        .map(|row| LeafHash.hash_iter(row.iter().copied()))
+        .collect()
+}
+/// Preserve the native tree and multiproof implementation with a different leaf owner.
+/// The caller must ensure `digests[j]` equals the canonical hash of matrix row j.
+pub fn commit_prehashed<T: Field, M: Matrix<T>>(
+    matrix: M,
+    digests: Vec<Digest>,
+) -> (Digest, MerkleTree<T, u8, M, 2, 32>) {
+    let tree =
+        MerkleTree::new_over_leaf_digests::<T, u8, _, _>(&LeafHash, &NodeHash, matrix, digests);
+    (tree.cap(0).roots()[0], tree)
+}
+pub fn open<T: Field, M: Matrix<T>>(
+    tree: &MerkleTree<T, u8, M, 2, 32>,
+    indices: &[usize],
+) -> Opening<T> {
     let (rows, paths) = mmcs::<T>().open_multi_batch(indices, tree);
     Opening {
         rows: rows.into_iter().map(|mut r| r.remove(0)).collect(),
@@ -137,6 +159,36 @@ mod tests {
                     .is_err()
             );
             assert!(paths.sibling_hashes.len() < indices.len() * 4);
+        }
+    }
+    #[test]
+    fn prehashed_matches_native_across_threads() {
+        for width in [1, 2, 4, 8] {
+            // Crosses rayon's small-work scheduling sizes and checks natural row order.
+            let matrix = RowMajorMatrix::new(
+                (0..8192 * width)
+                    .map(|j| F::from_usize(j * 31 + 7))
+                    .collect(),
+                width,
+            );
+            let (root, native) = commit(matrix.clone());
+            let indices = [0, 1, 2, 17, 2047, 4096, 8191];
+            let expected = open(&native, &indices);
+            let reference = hash_leaves(&matrix);
+            for threads in [1, 4, 32] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let hashes = pool.install(|| hash_leaves(&matrix));
+                assert_eq!(reference, hashes);
+                let (other, tree) = pool.install(|| commit_prehashed(matrix.clone(), hashes));
+                assert_eq!(root, other);
+                assert_eq!(
+                    crate::codec::encode(&expected).unwrap(),
+                    crate::codec::encode(&open(&tree, &indices)).unwrap()
+                );
+            }
         }
     }
     #[test]

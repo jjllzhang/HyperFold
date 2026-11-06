@@ -2,7 +2,7 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{BaseCodeKind, HyperFoldConfig},
-    pcs::{HyperFoldPcs, OpenOptions, Proof},
+    pcs::{FirstTreeStrategy, HyperFoldPcs, OpenOptions, Proof},
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
 };
@@ -248,4 +248,99 @@ fn low_memory_matches_retained_bytes_and_transcript() {
     }
     check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
     check::<Mersenne127, M127Quad>();
+}
+
+#[test]
+fn queried_row_strategies_match_native_bytes_transcript_and_tampering() {
+    fn check<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
+        let mut rng = stream(&[94; 32], b"query-row-pcs", 0);
+        for r in [2usize, 4, 8] {
+            for c in [2, 4] {
+                for depth in [1, 2, 3, 4] {
+                    for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                        let cfg = HyperFoldConfig::testing(
+                            F::KIND,
+                            backend,
+                            2 + depth * r.ilog2() as usize,
+                            2,
+                            r,
+                            c,
+                            E::DIMENSION,
+                        )
+                        .unwrap();
+                        let pcs = HyperFoldPcs::<F, E>::setup(cfg, [48; 32]).unwrap();
+                        let msg = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
+                        let (cm, data) = pcs.commit(msg).unwrap();
+                        for _ in 0..2 {
+                            let z = point::<F, E>(cfg.mu, &mut rng);
+                            let y = evaluate(&data.message, &z);
+                            let (native, mut t) = pcs.open(&cm, &data, &z, y).unwrap();
+                            let expected = codec::encode(&native).unwrap();
+                            let challenge = t.sample::<F, E>(b"query-row-agreement");
+                            for strategy in [
+                                FirstTreeStrategy::NativeRetained,
+                                FirstTreeStrategy::PrehashedRetained,
+                                FirstTreeStrategy::PrehashedRecovered,
+                            ] {
+                                let (proof, mut u, times) =
+                                    pcs.open_profiled(&cm, &data, &z, y, strategy).unwrap();
+                                assert_eq!(expected, codec::encode(&proof).unwrap());
+                                assert_eq!(challenge, u.sample::<F, E>(b"query-row-agreement"));
+                                let mut v = pcs.verify(&cm, &z, y, &proof).unwrap();
+                                assert_eq!(challenge, v.sample::<F, E>(b"query-row-agreement"));
+                                if depth == 1 {
+                                    assert!(times.first_tree_query.is_zero());
+                                } else {
+                                    let mut bad = proof.clone();
+                                    bad.inner[0].rows[0][0] += E::ONE;
+                                    assert!(pcs.verify(&cm, &z, y, &bad).is_err());
+                                    let mut bad = proof.clone();
+                                    if let Some(sibling) =
+                                        bad.inner[0].paths.sibling_hashes.first_mut()
+                                    {
+                                        sibling[0] ^= 1;
+                                        assert!(pcs.verify(&cm, &z, y, &bad).is_err());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+    check::<Mersenne127, M127Quad>();
+}
+
+#[test]
+fn queried_row_pcs_matches_one_four_and_thirty_two_threads() {
+    type F = Mersenne127;
+    type E = M127Quad;
+    let cfg = HyperFoldConfig::testing(F::KIND, BaseCodeKind::Qa, 14, 2, 4, 4, 2).unwrap();
+    let pcs = HyperFoldPcs::<F, E>::setup(cfg, [49; 32]).unwrap();
+    let mut rng = stream(&[95; 32], b"query-row-parallel", 0);
+    let (cm, data) = pcs
+        .commit((0..cfg.k()).map(|_| F::sample(&mut rng)).collect())
+        .unwrap();
+    let z = point::<F, E>(cfg.mu, &mut rng);
+    let y = evaluate(&data.message, &z);
+    let reference = codec::encode(&pcs.open(&cm, &data, &z, y).unwrap().0).unwrap();
+    for threads in [1, 4, 32] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for strategy in [
+            FirstTreeStrategy::PrehashedRetained,
+            FirstTreeStrategy::PrehashedRecovered,
+        ] {
+            let p = pool.install(|| {
+                pcs.open_with_strategy(&cm, &data, &z, y, strategy)
+                    .unwrap()
+                    .0
+            });
+            assert_eq!(reference, codec::encode(&p).unwrap());
+        }
+    }
 }
