@@ -1,6 +1,11 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    assert_eq!(
+        env::var("CARGO_CFG_TARGET_ARCH").unwrap(),
+        "x86_64",
+        "this comparison selects FourQ x64 C"
+    );
     let root = PathBuf::from(
         env::var_os("FOURQ_ROOT").expect("set FOURQ_ROOT to pinned FourQlib checkout"),
     );

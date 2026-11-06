@@ -765,6 +765,10 @@ fn correctness() {
             (BigUint::from(x) * BigUint::from(y)) % &p
         );
         assert_eq!(f.square().words(), h.square().words());
+        assert_eq!(
+            BigUint::from(f.square().canonical()),
+            (BigUint::from(x) * BigUint::from(x)) % &p
+        );
         assert_eq!(f.add(g).words(), h.add(j).words());
         assert_eq!(f.sub(g).words(), h.sub(j).words());
         assert_eq!(f.neg().words(), h.neg().words());

@@ -45,6 +45,9 @@ def main():
                     binary_sha256=sha(root / 'profile'), sizes=args.sizes, kernels=args.kernels,
                     threads=32, windows=5, window_ms=100, jobs=jobs,
                     root_lock_sha256=sha(repo / 'Cargo.lock'), comparison_lock_sha256=sha(here / 'Cargo.lock'),
+                    arithmetic_sha256=sha(repo/'src/field_m127.rs'),
+                    plonky3_commit=command_text(['git','-C','/home/zjl/BinaryField-Bench/vendor/Plonky3','rev-parse','HEAD']),
+                    plonky3_status=command_text(['git','-C','/home/zjl/BinaryField-Bench/vendor/Plonky3','status','--short']),
                     rustc=command_text(['rustc', '-Vv']), cc=command_text(['cc', '--version']),
                     build_flags='RUSTFLAGS=-C target-cpu=native;C:-O3 -march=native -fwrapv -fno-strict-aliasing;_AMD64_,__LINUX__;noASM/noAVX macros',
                     fourq_commit=command_text(['git', '-C', str(fourq), 'rev-parse', 'HEAD']),
@@ -59,11 +62,13 @@ def main():
                     directive='c983b3c0-0511-4d4e-b7e3-180b247efe62',
                     plan='/home/zjl/zkp-research/notes/impl-plan-hyperfold-m127-performance.md')
     assert not manifest['source_status'], 'commit verified benchmark sources before timing'
+    assert manifest['plonky3_commit']=='0d803737b681774186cd283b1fd2d8e493655c82' and not manifest['plonky3_status']
     assert manifest['fourq_commit'] == '1031567f23278e1135b35cc04e5d74c2ac88c029'
     assert not command_text(['git','-C',str(fourq),'status','--porcelain','--untracked-files=no'])
     (root/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     shutil.copytree(here, root/'source', ignore=shutil.ignore_patterns('target'))
     shutil.copy2(repo/'Cargo.lock', root/'root-Cargo.lock')
+    shutil.copy2(repo/'src/field_m127.rs',root/'field_m127.rs')
     shutil.copy2(manifest['plan'], root/'implementation-plan.md')
     signatures = {}
     statuses = []
