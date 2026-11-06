@@ -5,7 +5,7 @@ use crate::{
     base_code::{BaseCode, BaseCodeImpl},
     encoder::{RecoveredFirstMatrix, beta, encode_top, fold_level, fold_row},
     matrix_h::LocalMatrix,
-    mmcs::{self, Digest, Opening, Tree},
+    merkle_commitment::{self, Digest, Opening, Tree},
     params::{DiagonalTables, Error, HyperFoldConfig, Result},
     sampling::SampleBase,
     sumcheck,
@@ -318,7 +318,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             &message,
             self.config.depth(),
         );
-        let (root, tree) = mmcs::commit(pi);
+        let (root, tree) = merkle_commitment::commit(pi);
         let (_, z0) = self.commit_prefix(root);
         let y0 = sumcheck::evaluate(&message, &z0);
         Ok((
@@ -419,21 +419,21 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             if i > 1 {
                 let b = beta(&alphas);
                 let next = if i == d {
-                    let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
+                    let matrices = merkle_commitment::mmcs::<F>().get_matrices(top_tree);
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 } else if let Some(matrix) = first_dense.as_ref() {
                     fold_level(config, &self.h, &self.diagonals, matrix, i, &b)
                 } else {
-                    let matrices =
-                        mmcs::mmcs::<E>().get_matrices(trees.last().expect("previous tree"));
+                    let matrices = merkle_commitment::mmcs::<E>()
+                        .get_matrices(trees.last().expect("previous tree"));
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 };
                 // The successor matrix is complete; release the sole dense owner
                 // before committing the next tree. No descriptor borrows it.
                 first_dense = None;
                 let root = if i == d {
-                    let digests = mmcs::hash_leaves(&next);
-                    let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
+                    let digests = merkle_commitment::hash_leaves(&next);
+                    let matrices = merkle_commitment::mmcs::<F>().get_matrices(top_tree);
                     let matrix = RecoveredFirstMatrix::new(
                         config,
                         matrices[0],
@@ -441,14 +441,14 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                         &self.diagonals.levels[d - 1].inverse,
                         b,
                     );
-                    let (root, lazy) = mmcs::commit_prehashed(matrix, digests);
+                    let (root, lazy) = merkle_commitment::commit_prehashed(matrix, digests);
                     recovered_tree = Some(lazy);
                     if d >= 3 {
                         first_dense = Some(next);
                     }
                     root
                 } else {
-                    let (root, tree) = mmcs::commit(next);
+                    let (root, tree) = merkle_commitment::commit(next);
                     trees.push(tree);
                     root
                 };
@@ -464,7 +464,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         f.shrink_to_fit();
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
-        let top = mmcs::open(top_tree, &top_indices);
+        let top = merkle_commitment::open(top_tree, &top_indices);
         let mut inner: Vec<Option<CompressedOpening<E>>> = (0..d - 1).map(|_| None).collect();
         let compress_opening = |pos: usize, indices: &[usize], o: Opening<E>| {
             let i = d - 1 - pos;
@@ -488,12 +488,20 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         for (index, tree) in trees.into_iter().enumerate() {
             let pos = index + 1;
             let indices = project(&queries, config.n(d - 2 - pos));
-            inner[pos] = Some(compress_opening(pos, &indices, mmcs::open(&tree, &indices)));
+            inner[pos] = Some(compress_opening(
+                pos,
+                &indices,
+                merkle_commitment::open(&tree, &indices),
+            ));
         }
         if let Some(tree) = recovered_tree {
             let start = timings.is_some().then(Instant::now);
             let indices = project(&queries, config.n(d - 2));
-            inner[0] = Some(compress_opening(0, &indices, mmcs::open(&tree, &indices)));
+            inner[0] = Some(compress_opening(
+                0,
+                &indices,
+                merkle_commitment::open(&tree, &indices),
+            ));
             if let Some(start) = start {
                 timings.as_mut().unwrap().first_tree_query = start.elapsed();
             }
@@ -572,7 +580,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         self.base.encode_slice(&proof.final_table, &mut pi0);
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
-        mmcs::verify(
+        merkle_commitment::verify(
             cm.root,
             config.n(d - 1),
             config.r,
@@ -616,7 +624,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 row.insert(p / np, v);
                 rows.push(row);
             }
-            mmcs::verify(
+            merkle_commitment::verify(
                 proof.roots[pos],
                 np,
                 config.r,
@@ -690,14 +698,14 @@ mod lifecycle_tests {
         let message: Vec<_> = (0..cfg.k()).map(F::from_usize).collect();
         let pointer = message.as_ptr();
         let (_, data) = pcs.commit(message).unwrap();
-        let top_pointer = mmcs::mmcs::<F>().get_matrices(&data.tree)[0]
+        let top_pointer = merkle_commitment::mmcs::<F>().get_matrices(&data.tree)[0]
             .values
             .as_ptr();
         let (oracle, witness) = data.into_parts();
         assert_eq!(pointer, witness.values().as_ptr());
         assert_eq!(
             top_pointer,
-            mmcs::mmcs::<F>().get_matrices(&oracle.tree)[0]
+            merkle_commitment::mmcs::<F>().get_matrices(&oracle.tree)[0]
                 .values
                 .as_ptr()
         );

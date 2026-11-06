@@ -269,26 +269,27 @@ mod tests {
                                 );
                             }
                             assert!(lazy.row(lazy.height()).is_none());
-                            let hashes = crate::mmcs::hash_leaves(&dense);
-                            let (root, native) = crate::mmcs::commit(dense.clone());
+                            let hashes = crate::merkle_commitment::hash_leaves(&dense);
+                            let (root, native) = crate::merkle_commitment::commit(dense.clone());
                             let mut indices =
                                 vec![0, 1, 2, lazy.height() / 2, lazy.height() - 1, 1];
                             indices.sort_unstable();
                             indices.dedup();
-                            let expected = crate::mmcs::open(&native, &indices);
+                            let expected = crate::merkle_commitment::open(&native, &indices);
                             drop(native);
                             drop(dense); // Neither descriptor nor hash tree owns the dense codeword.
                             reads.store(0, Ordering::Relaxed);
-                            let (other, tree) = crate::mmcs::commit_prehashed(lazy, hashes);
+                            let (other, tree) =
+                                crate::merkle_commitment::commit_prehashed(lazy, hashes);
                             assert_eq!(root, other);
                             assert_eq!(reads.load(Ordering::Relaxed), 0); // Constructor never enumerates lazy rows.
-                            let opening = crate::mmcs::open(&tree, &indices);
+                            let opening = crate::merkle_commitment::open(&tree, &indices);
                             assert_eq!(reads.load(Ordering::Relaxed), indices.len());
                             assert_eq!(
                                 crate::codec::encode(&expected).unwrap(),
                                 crate::codec::encode(&opening).unwrap()
                             );
-                            crate::mmcs::verify(
+                            crate::merkle_commitment::verify(
                                 root,
                                 config.n(depth - 2),
                                 r,
@@ -300,7 +301,7 @@ mod tests {
                             let mut bad = opening.rows.clone();
                             bad[0][0] += E::ONE;
                             assert!(
-                                crate::mmcs::verify(
+                                crate::merkle_commitment::verify(
                                     root,
                                     config.n(depth - 2),
                                     r,
@@ -313,7 +314,7 @@ mod tests {
                             let mut swapped = opening.rows.clone();
                             swapped.swap(0, 1);
                             assert!(
-                                crate::mmcs::verify(
+                                crate::merkle_commitment::verify(
                                     root,
                                     config.n(depth - 2),
                                     r,
@@ -326,7 +327,7 @@ mod tests {
                             let mut swapped = opening.rows.clone();
                             swapped[0].swap(0, 1);
                             assert!(
-                                crate::mmcs::verify(
+                                crate::merkle_commitment::verify(
                                     root,
                                     config.n(depth - 2),
                                     r,
@@ -339,7 +340,7 @@ mod tests {
                             let mut bad = opening.paths.clone();
                             bad.sibling_hashes[0][0] ^= 1;
                             assert!(
-                                crate::mmcs::verify(
+                                crate::merkle_commitment::verify(
                                     root,
                                     config.n(depth - 2),
                                     r,

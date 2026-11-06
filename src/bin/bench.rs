@@ -1,7 +1,7 @@
 //! One official lifecycle for every certified field/code/size selection.
 use clap::Parser;
 use hyperfold_pcs::{
-    benchmark::{METRICS, TrialRecord, run_trial},
+    benchmark_trial::{METRICS, TrialRecord, run_trial},
     field_m127::{M127Quad, Mersenne127},
     params::{BaseCodeKind, BaseFieldKind, CERTIFIED_CONFIGS, HyperFoldConfig},
     sampling::SampleBase,

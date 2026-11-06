@@ -1,7 +1,7 @@
 //! Criterion measures the same full fresh-Setup lifecycle as the official CLI.
 use criterion::{Criterion, criterion_group, criterion_main};
 use hyperfold_pcs::{
-    benchmark::run_trial,
+    benchmark_trial::run_trial,
     params::{BaseCodeKind, BaseFieldKind, HyperFoldConfig},
 };
 use p3_field::extension::CubicTrinomialExtensionField;
