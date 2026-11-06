@@ -1,9 +1,0 @@
-{
-  "utc": "2026-11-05T20:11:52.393461+00:00",
-  "directive": "81c5aca0",
-  "reused_retained_cases": 128,
-  "identical_source_files": 896,
-  "binary_sha256": "2b2df0a76f29b1746174eb3280998dc7e7bf6c709e6715faf4554e9a0800906e",
-  "reused_source_manifest_sha256": "10d925ba574535cb4c51acb49e8b183c022c2b701550459ce15caa4c226932ab",
-  "kernel_changed": false
-}

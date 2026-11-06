@@ -1,9 +1,0 @@
-{
-  "profiles": 8,
-  "paired_configs": 4,
-  "raw_samples": 24,
-  "all_exit_codes": 0,
-  "means_and_sample_sd_recomputed": true,
-  "cross_strategy_proof_commitment_transcript_fingerprints_equal": true,
-  "binary_sha256_verified": true
-}

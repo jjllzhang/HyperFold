@@ -1,7 +1,0 @@
-{
-  "enabled": true,
-  "memory_guard_enabled": false,
-  "directive": "69fd73e0-2c8f-43a0-a570-356f7828c11e",
-  "first_tree_strategy": "prehashed_recovered",
-  "setup_per_trial": true
-}
