@@ -161,3 +161,19 @@ python3 scripts/attempt_retained_extremes.py --root /path/to/new-followup \
 This option changes the worker's code-level termination policy; it does not change
 host RAM, swap, Linux overcommit, cgroup limits or the operating system's response
 to allocation failure. All such settings should be captured with the run evidence.
+
+Each new supplemental attempt now writes an immutable `execution-contract.json`
+before launch: binary hash, full command, guard policy, repetition count and
+accountable directive. A completed attempt is reused only when that contract,
+its original command and status guard setting match. Legacy statuses without a
+contract, changed contracts and incomplete directories are rejected before any
+command evidence is overwritten; preserve those directories and use a new one.
+
+The analyzer accepts `measured`, `memory_guard_stopped` and `runtime_failed` as
+distinct states. It requires nonzero exit evidence and blank incomplete metrics
+for failures. Resource signals, stop reasons and available global OOM-counter
+changes are carried into the report without treating a signal as OOM proof.
+`--validate-only` checks the evidence without generating figures or rewriting it.
+Regression checks run with `python3 -m unittest discover -s scripts -p 'test_*.py'`;
+the failure-classification fixture is explicitly synthetic and never published as
+an experimental result.

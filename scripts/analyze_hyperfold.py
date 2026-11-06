@@ -39,6 +39,7 @@ def write_csv(path, data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True, type=pathlib.Path)
+    parser.add_argument('--validate-only', action='store_true', help='Check evidence without plotting or rewriting files')
     parser.add_argument('--output', required=True, type=pathlib.Path)
     parser.add_argument('--repo', type=pathlib.Path, default=pathlib.Path('/home/zjl/HyperFold'))
     parser.add_argument('--parameter-dir', type=pathlib.Path, help='Versioned CSV/SHA256SUMS directory; defaults to repo/data')
@@ -88,9 +89,9 @@ def main():
         groups.setdefault(key(row), []).append(row)
     enriched = []
     resource_rows = []
-    stopped = []
+    stopped, failed = [], []
     for row in means:
-        assert row['status'] in ('measured', 'memory_guard_stopped')
+        assert row['status'] in ('measured', 'memory_guard_stopped', 'runtime_failed')
         assert row['low_memory'] == 'false' and row['threads'] == '32' and row['repetitions'] == '3'
         spec = expected[key(row)]
         assert all(row[k] == spec[k] for k in ('mu0', 'extension_degree', 'queries'))
@@ -111,15 +112,28 @@ def main():
                        int(s['eval_proof_bytes']) == int(row['eval_proof_bytes']) for s in samples)
         else:
             assert not samples and all(not row[k] for k in MEASUREMENTS)
-            assert state['memory_guard'] and state['exit_code'] != 0
-            stopped.append(name)
+            assert state['exit_code'] != 0
+            if row['status'] == 'memory_guard_stopped':
+                assert state['memory_guard'] and state['stop_reason'] == 'available_memory_guard'
+                stopped.append(name)
+            else:
+                assert not state['memory_guard'] and state['stop_reason'] is None
+                failed.append(name)
+        if directory == attempt:
+            assert state.get('memory_guard_enabled', True) == summary.get('memory_guard_enabled', True)
         resource = (directory / 'resources.txt').read_text()
         match = re.search(r'Maximum resident set size \(kbytes\): (\d+)', resource)
         rss_kib = int(match[1]) if match else int(state['observed_peak_hwm_kib'])
         command = json.loads((directory / 'command.json').read_text())
         assert command[command.index('--memory-mode') + 1] in ('retained', 'auto')
         # Reused auto-selected cases are proven retained by all their recorded flags.
-        record = dict(row, peak_rss_gib=f'{rss_kib / 2**20:.6f}',
+        before_oom = state.get('system_before', {}).get('vmstat', {}).get('oom_kill')
+        after_oom = state.get('system_after', {}).get('vmstat', {}).get('oom_kill')
+        oom_delta = after_oom - before_oom if before_oom is not None and after_oom is not None else ''
+        signal_match = re.search(r'Command terminated by signal (\d+)', resource)
+        record = dict(row, exit_code=state['exit_code'], stop_reason=state.get('stop_reason') or 'process_exit',
+                      resource_signal=signal_match[1] if signal_match else '', global_oom_kill_delta=oom_delta,
+                      peak_rss_gib=f'{rss_kib / 2**20:.6f}',
                       rss_source='gnu_time' if match else 'sampled_hwm',
                       evidence_directory=str(directory.relative_to(root)),
                       explicit_actual_attempt=str(directory == attempt).lower())
@@ -128,8 +142,13 @@ def main():
                 f'{statistics.stdev(float(s[metric]) for s in samples):.6f}' if samples else '')
         enriched.append(record)
         resource_rows.append({k: record[k] for k in KEY_FIELDS +
-                              ('status', 'peak_rss_gib', 'rss_source', 'evidence_directory', 'explicit_actual_attempt')})
+                              ('status', 'exit_code', 'stop_reason', 'resource_signal', 'global_oom_kill_delta',
+                               'peak_rss_gib', 'rss_source', 'evidence_directory', 'explicit_actual_attempt')})
     assert len(stopped) == summary['memory_guard_stopped']
+    assert len(failed) == summary.get('runtime_failed', 0)
+    if args.validate_only:
+        print(json.dumps(dict(summary, validated=True), indent=2))
+        return
     out.mkdir(parents=True, exist_ok=True)
     write_csv(out / 'results.csv', enriched)
     write_csv(out / 'raw-samples.csv', raw)
@@ -137,6 +156,9 @@ def main():
     for name in ('manifest.json', 'reused-source-manifest.json', 'reuse-validation.json',
                  'actual-attempt-policy.json', 'final-finished.json', 'policy-directive.json'):
         shutil.copy2(root / name, out / name)
+    for name in ('unguarded-system-context.json', 'baseline-source-manifest.json', 'baseline-policy-directive.json'):
+        if (root / name).exists():
+            shutil.copy2(root / name, out / name)
     destination_parameters = out / 'parameters'
     destination_parameters.mkdir(exist_ok=True)
     for name in ('goldilocks-parameters.csv', 'm127-parameters.csv', 'SHA256SUMS'):
@@ -206,16 +228,21 @@ def main():
     report = [
         '# HyperFold retained-memory experiment report', '',
         f"Validated {summary['processed']} configurations: {summary['measured']} measured, "
-        f"{summary['memory_guard_stopped']} stopped by the live available-memory guard; "
+        f"{summary['memory_guard_stopped']} active memory-guard stops, "
+        f"{summary.get('runtime_failed', 0)} process failures; "
         f"{summary['raw_samples']} completed raw samples. No recomputation was used.", '',
         'Each measured configuration used 32 Rayon threads, one warmup and three measured repetitions. '
         'Commit/open/verify means exclude Setup and final serialization. Proof size includes the '
         'commitment and evaluation proof, including wire framing. `raw-samples.csv` contains every '
         'completed repetition; `results.csv` adds sample standard deviations and observed peak RSS.', '',
         'The two largest M127 configurations were actually attempted with retained trees, bypassing '
-        'the estimate ceiling. A guard stop means host available memory crossed the 12 GiB reserve. '
-        'It is not an operating-system OOM event or proof that every memory policy must fail. '
-        'Partial attempt data remains in the evidence archive; incomplete aggregate measurements are blank.', '',
+        'the estimate ceiling. ' + ('Programmatic memory termination was disabled for this follow-up. '
+        if summary.get('memory_guard_enabled', True) is False else
+        'The live available-memory guard was enabled for these attempts. ') +
+        'Incomplete aggregate measurements are blank; partial samples, real exit codes and memory '
+        'observations are retained. A guard stop, a process exit/signal, and an OS-confirmed OOM are '
+        'distinct outcomes. A SIGKILL alone does not establish an OOM; global OOM-counter changes '
+        'are supporting host observations, not process-specific attribution.', '',
         f"Maximum recorded RSS: {float(peak['peak_rss_gib']):.3f} GiB at {' / '.join(key(peak))}. "
         'Resource usage covers the full case process, including Setup and warmup.', '',
         '## Reproduction and limits', '',
@@ -251,13 +278,17 @@ def main():
                       + ' | '.join(f'{v:.3f}' for v in values) + ' |')
     report += ['']
     report += ['## Actual extreme-case attempts', '',
-               '| Case | Start UTC | Finish UTC | Sampled HWM GiB | Minimum host available GiB | Stop reason |',
-               '|---|---|---|---:|---:|---|']
+               '| Case | Start UTC | Finish UTC | Sampled HWM GiB | Minimum available GiB | Exit code | Stop reason | Global OOM-count delta |',
+               '|---|---|---|---:|---:|---:|---|---:|']
     for name in ('M127-Qa-30-2-4', 'M127-Rs-30-2-4'):
         state = json.loads((root / 'actual-attempts' / name / 'status.json').read_text())
+        before = state.get('system_before', {}).get('vmstat', {}).get('oom_kill')
+        after = state.get('system_after', {}).get('vmstat', {}).get('oom_kill')
+        delta = after-before if before is not None and after is not None else ''
         report.append(f"| {name} | {state['started_utc']} | {state['finished_utc']} | "
                       f"{state['observed_peak_hwm_kib']/2**20:.6f} | "
-                      f"{state['minimum_host_available_bytes']/2**30:.6f} | {state['stop_reason']} |")
+                      f"{state['minimum_host_available_bytes']/2**30:.6f} | {state['exit_code']} | "
+                      f"{state['stop_reason'] or 'process_exit'} | {delta} |")
     report += ['']
     report += ['## μ=30 configurations', '',
                '| Field | Backend | r | c | Status | Commit ms | Open ms | Verify ms | Total bytes | Peak GiB |',

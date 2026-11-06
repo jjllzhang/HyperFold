@@ -119,6 +119,28 @@ def monitor_command(command, directory, guard_gib, policy_check):
             "system_before": system_before, "system_after": system_memory_snapshot()}
 
 
+def prepare_attempt(directory, command, contract):
+    """Bind immutable evidence before launch; refuse incompatible or partial reuse."""
+    status_path = directory / "status.json"
+    contract_path = directory / "execution-contract.json"
+    command_path = directory / "command.json"
+    if status_path.exists():
+        if not contract_path.exists() or not command_path.exists():
+            raise RuntimeError("existing attempt has no immutable contract; use a new directory")
+        if json.loads(contract_path.read_text()) != contract:
+            raise RuntimeError("attempt contract changed; use a new directory")
+        if json.loads(command_path.read_text()) != command:
+            raise RuntimeError("recorded command differs from contract; use a new directory")
+        status = json.loads(status_path.read_text())
+        if status.get("memory_guard_enabled", True) != contract["memory_guard_enabled"]:
+            raise RuntimeError("recorded status guard differs from contract; use a new directory")
+        return status
+    if any(directory.iterdir()):
+        raise RuntimeError("incomplete attempt evidence exists; preserve it and use a new directory")
+    contract_path.write_text(json.dumps(contract, indent=2) + "\n")
+    command_path.write_text(json.dumps(command, indent=2) + "\n")
+    return None
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True)
@@ -171,15 +193,18 @@ def main():
                    old["backend"].lower(), "--r", "2", "--c", "4", "--repetitions", str(repetitions),
                    "--memory-mode", "retained", "--max-estimated-gib", str(args.estimate_bypass_gib),
                    "--output", str(result)]
-        (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
-        progress_path.write_text(json.dumps({"phase": "attempting", "current": key,
-                                             "updated_utc": utc()}) + "\n")
-        if status_path.exists():
-            status = json.loads(status_path.read_text())
-        else:
+        contract = {"schema": 1, "binary_sha256": manifest["contract"]["binary_sha256"],
+                    "command": command, "memory_guard_enabled": not args.disable_memory_guard,
+                    "min_available_gib": guard, "repetitions": repetitions,
+                    "policy_directive": json.loads(policy_path.read_text()).get("directive_message")}
+        status = prepare_attempt(directory, command, contract)
+        progress_path.write_text(json.dumps({"phase": "reusing_recorded_attempt" if status else "attempting",
+                                             "current": key, "updated_utc": utc()}) + "\n")
+        if status is None:
             if guard is not None and available_bytes() < guard * 2**30:
                 raise RuntimeError("insufficient available memory before actual attempt")
             status = monitor_command(command, directory, guard, enabled)
+            status["execution_contract"] = contract
             status_path.write_text(json.dumps(status, indent=2) + "\n")
         if status["stop_reason"] == "policy_revoked":
             raise RuntimeError("actual attempt stopped because policy changed")
