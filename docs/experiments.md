@@ -135,3 +135,29 @@ under `actual-attempts/`. A stopped case has blank aggregate measurements. The
 original base table remains immutable; use `final-results.csv`,
 `final-results.raw.csv` and `final-finished.json` for the combined final outcomes.
 No recomputation fallback is permitted by this path.
+
+## Follow-up with programmatic memory termination disabled
+
+For an explicitly requested unrestricted follow-up, the actual-attempt runner
+accepts `--disable-memory-guard`. Its policy file must also set
+`memory_guard_enabled=false`; mismatched policy/arguments are rejected. This
+removes the pre-start available-memory check and the live low-available-memory
+termination branch. Memory observations and explicit policy revocation remain.
+The estimate ceiling is bypassed for the two selected cases as before; retained
+mode and the pinned prover binary stay the same.
+
+Record this follow-up in a separate evidence root. Earlier guard-stopped samples
+remain historical data. The runner records process exit status, system memory,
+swap/OOM counters and observed memory traces. With the guard disabled it attempts
+both cases once even if one process fails, leaving incomplete aggregate metrics
+blank. A nonzero process exit is recorded as `runtime_failed`; identify its actual
+cause from the resource/kernel evidence rather than assuming it was an OOM.
+
+```sh
+python3 scripts/attempt_retained_extremes.py --root /path/to/new-followup \
+  --estimate-bypass-gib 1024 --disable-memory-guard
+```
+
+This option changes the worker's code-level termination policy; it does not change
+host RAM, swap, Linux overcommit, cgroup limits or the operating system's response
+to allocation failure. All such settings should be captured with the run evidence.

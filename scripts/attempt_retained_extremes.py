@@ -2,7 +2,8 @@
 """Queue actual retained-only attempts after a base sweep, preserving failures.
 
 The estimate ceiling is bypassed only for the two explicit M127 cases. Actual
-available memory is monitored; guard stops produce blank aggregate measurements.
+available memory is observed. The optional guard can be explicitly disabled for
+an authorized follow-up; real process failures retain blank aggregate measurements.
 Base results stay immutable. Read final-results*.csv and final-finished.json after
 this supplemental phase, rather than treating estimated exclusions as outcomes.
 """
@@ -63,8 +64,20 @@ def stop_workload(proc):
         proc.wait()
 
 
+def system_memory_snapshot():
+    meminfo = {}
+    for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
+        name, value = line.split(":", 1)
+        if name in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree", "Committed_AS", "CommitLimit"):
+            meminfo[name + "_kib"] = int(value.split()[0])
+    vmstat = dict(line.split() for line in pathlib.Path("/proc/vmstat").read_text().splitlines())
+    return {"meminfo": meminfo, "vmstat": {key: int(vmstat[key]) for key in
+            ("oom_kill", "pswpin", "pswpout") if key in vmstat},
+            "overcommit_memory": pathlib.Path("/proc/sys/vm/overcommit_memory").read_text().strip()}
+
 def monitor_command(command, directory, guard_gib, policy_check):
     started = utc()
+    system_before = system_memory_snapshot()
     minimum_available = available_bytes()
     peak_rss_kib = 0
     peak_hwm_kib = 0
@@ -91,7 +104,7 @@ def monitor_command(command, directory, guard_gib, policy_check):
                 previous_log = now
             if not policy_check():
                 reason = "policy_revoked"
-            elif available < guard_gib * 2**30:
+            elif guard_gib is not None and available < guard_gib * 2**30:
                 reason = "available_memory_guard"
             if reason:
                 stop_workload(proc)
@@ -101,26 +114,31 @@ def monitor_command(command, directory, guard_gib, policy_check):
     return {"started_utc": started, "finished_utc": utc(), "exit_code": rc,
             "stop_reason": reason, "memory_guard": reason == "available_memory_guard",
             "minimum_host_available_bytes": minimum_available,
-            "observed_peak_rss_kib": peak_rss_kib, "observed_peak_hwm_kib": peak_hwm_kib}
+            "observed_peak_rss_kib": peak_rss_kib, "observed_peak_hwm_kib": peak_hwm_kib,
+            "memory_guard_enabled": guard_gib is not None,
+            "system_before": system_before, "system_after": system_memory_snapshot()}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True)
     parser.add_argument("--estimate-bypass-gib", type=float, default=1024)
+    parser.add_argument("--disable-memory-guard", action="store_true",
+                        help="Disable both pre-start and live available-memory termination; observe only.")
     args = parser.parse_args()
     root = args.root.resolve()
     policy_path = root / "actual-attempt-policy.json"
 
     def enabled():
         policy = json.loads(policy_path.read_text())
-        return policy["enabled"] and policy["memory_mode"] == "retained"
+        return (policy["enabled"] and policy["memory_mode"] == "retained"
+                and policy.get("memory_guard_enabled", True) == (not args.disable_memory_guard))
 
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["contract"]["memory_mode"] == "retained"
     assert sha(root / "bench") == manifest["contract"]["binary_sha256"]
     repetitions = manifest["contract"]["repetitions"]
-    guard = manifest["contract"]["min_available_gib"]
+    guard = None if args.disable_memory_guard else manifest["contract"]["min_available_gib"]
     progress_path = root / "actual-attempt-progress.json"
     progress_path.write_text(json.dumps({"phase": "waiting_for_base", "queued": KEYS,
                                          "updated_utc": utc()}) + "\n")
@@ -159,7 +177,7 @@ def main():
         if status_path.exists():
             status = json.loads(status_path.read_text())
         else:
-            if available_bytes() < guard * 2**30:
+            if guard is not None and available_bytes() < guard * 2**30:
                 raise RuntimeError("insufficient available memory before actual attempt")
             status = monitor_command(command, directory, guard, enabled)
             status_path.write_text(json.dumps(status, indent=2) + "\n")
@@ -181,7 +199,7 @@ def main():
             for field in MEASUREMENT_FIELDS:
                 replacement[field] = ""
             base[index[key]] = replacement
-            if not status["memory_guard"]:
+            if not status["memory_guard"] and not args.disable_memory_guard:
                 write_table(root / "final-results.csv", base)
                 raise RuntimeError(f"unexpected runtime failure in {key}; inspect actual-attempts")
         write_table(root / "final-results.csv", base)
@@ -190,7 +208,9 @@ def main():
                "measured": sum(row["status"] == "measured" for row in base),
                "memory_guard_stopped": sum(row["status"] == "memory_guard_stopped" for row in base),
                "estimate_only_exclusions": sum(row["status"] == "skipped_memory" for row in base),
-               "raw_samples": len(base_raw) + len(supplemental_raw), "recomputation_used": False}
+               "raw_samples": len(base_raw) + len(supplemental_raw), "recomputation_used": False,
+               "runtime_failed": sum(row["status"] == "runtime_failed" for row in base),
+               "memory_guard_enabled": not args.disable_memory_guard}
     assert summary["estimate_only_exclusions"] == 0
     (root / "final-finished.json").write_text(json.dumps(summary, indent=2) + "\n")
     progress_path.write_text(json.dumps({"phase": "finished", **summary}) + "\n")
