@@ -30,6 +30,7 @@ def main():
     args = parser.parse_args()
     root, out = args.root, args.output
     manifest = json.loads((root/'manifest.json').read_text())
+    schema=manifest.get('timing_schema',1)
     finished = json.loads((root/'finished.json').read_text())
     assert finished['processes'] == len(manifest['jobs'])
     assert finished['exit_codes'] == [0]*len(manifest['jobs'])
@@ -53,10 +54,20 @@ def main():
             elapsed = float(r['elapsed_seconds'])
             work = int(r['work_items'])
             assert math.isfinite(elapsed) and elapsed >= .1
-            assert int(r['passes'])*int(r['elements']) == work > 0
+            assert int(r['passes'])*int(r['elements'])//(32 if schema==2 else 1) == work > 0
             clocks = list(map(int,r['thread_elapsed_ns'].split(';')))
             counts = list(map(int,r['thread_work_items'].split(';')))
             assert len(clocks) == len(counts) == 32 and sum(counts) == work
+            if schema==2:
+                passes=list(map(int,r['thread_passes'].split(';')))
+                walls=list(map(int,r['thread_wall_ns'].split(';')))
+                quanta=list(map(int,r['thread_quantum'].split(';')))
+                assert len(passes)==len(walls)==len(quanta)==32
+                assert all(p>0 and q>0 and p%q==0 for p,q in zip(passes,quanta))
+                assert sum(passes)==int(r['passes'])
+                assert counts==[p*int(r['elements'])//32 for p in passes]
+                assert all(w>=100000000 and 0<t<=w for t,w in zip(clocks,walls))
+                assert all(w<=elapsed*1e9+5000 for w in walls)
             assert all(t >= 0 for t in clocks) and all(c >= 0 for c in counts)
             assert all(t <= elapsed*1e9+5000 for t in clocks)
             # elapsed is stored to nine decimal seconds; tolerate its <.5ns rounding.
@@ -128,7 +139,11 @@ def main():
     if smoke:
         report += '**SMOKE ONLY: not the complete formal baseline.**\n\n'
     report += f"{finished['processes']} independent processes / {len(records)} windows validated. All timings use32threads. Arithmetic source hash: `{manifest.get('arithmetic_sha256','not recorded in this earlier smoke')}`.\n\n"
-    report += ('Numbers below are wall nanoseconds per **input item**, inclusive of common pool dispatch and collection of per-worker counters. '
+    if schema==2:
+        report+='Timing schema2 uses32resident OS workers synchronized before each window. Workers repeat local kernel batches for at least100ms each; calibration/warmup finish before the measured start. Hashes/CSV/result collection are after all timed workers finish. Worker clocks are amortized across calibrated blocks targeting1ms. The wall clock includes start/end synchronization once per window. Full-width seeded fold challenges are converted before timing and included in the input fingerprint. The process is restricted to the recorded32distinct physical cores; this grants no exclusive use of those cores.\n\n'
+    else:
+        report+='Legacy short-task dispatch schema: this dataset is retained only as a functional harness smoke, not a formal performance baseline. Its small fold challenges and repeated dispatch were superseded before formal measurement.\n\n'
+    report += ('Numbers below are wall nanoseconds per **input item**, inclusive of synchronization (or legacy dispatch for schema1). '
                'Scalar arithmetic has one operation per item; composite kernels have multiple operations. '
                'Per-worker kernel costs, raw thread counters, process/window standard deviations and matched-round ratios are separate CSV columns. '
                'Worker elapsed costs include scheduling effects and are not isolated single-thread latency. '

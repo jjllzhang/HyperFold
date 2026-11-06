@@ -70,10 +70,10 @@ trait Element: Copy + Send + Sync + 'static {
     fn mixed(self, b: Self) -> Self {
         self.mul(Self::from_words([b.words()[0], 0]))
     }
-    fn lift_fold(self, b: Self) -> Self {
+    fn lift_fold(self, b: Self, alpha: Self) -> Self {
         let a = Self::from_words([self.words()[0], 0]);
         let b = Self::from_words([b.words()[0], 0]);
-        a.add(b.sub(a).mul(Self::from_words([17, 19])))
+        a.add(b.sub(a).mul(alpha))
     }
 }
 macro_rules! ops {
@@ -113,8 +113,8 @@ impl Element for Mersenne127 {
     fn mixed(self, b: Self) -> Self {
         self * b
     }
-    fn lift_fold(self, b: Self) -> Self {
-        self + (b - self) * Self::new(17)
+    fn lift_fold(self, b: Self, alpha: Self) -> Self {
+        self + (b - self) * alpha
     }
     ops!(p3_field::Field, p3_field::PrimeCharacteristicRing);
 }
@@ -131,10 +131,10 @@ impl Element for M127Quad {
         let c: &[Mersenne127] = b.as_basis_coefficients_slice();
         self * c[0]
     }
-    fn lift_fold(self, b: Self) -> Self {
+    fn lift_fold(self, b: Self, alpha: Self) -> Self {
         let a: Mersenne127 = self.as_basis_coefficients_slice()[0];
         let b: Mersenne127 = b.as_basis_coefficients_slice()[0];
-        Self::from(a) + Self::new([Mersenne127::new(17), Mersenne127::new(19)]) * (b - a)
+        Self::from(a) + alpha * (b - a)
     }
     ops!(p3_field::Field, p3_field::PrimeCharacteristicRing);
 }
@@ -178,8 +178,8 @@ impl Element for AF {
     fn mixed(self, b: Self) -> Self {
         self * b
     }
-    fn lift_fold(self, b: Self) -> Self {
-        self + (b - self) * AF::from(17u64)
+    fn lift_fold(self, b: Self, alpha: Self) -> Self {
+        self + (b - self) * alpha
     }
     ark_ops!();
 }
@@ -195,10 +195,10 @@ impl Element for AE {
         self.mul_assign_by_fp(&b.c0);
         self
     }
-    fn lift_fold(self, b: Self) -> Self {
+    fn lift_fold(self, b: Self, alpha: Self) -> Self {
         let a = self.c0;
         let b = b.c0;
-        let mut x = Self::new(AF::from(17u64), AF::from(19u64));
+        let mut x = alpha;
         x.mul_assign_by_fp(&(b - a));
         Self::new(a, AF::default()) + x
     }
@@ -262,6 +262,7 @@ unsafe extern "C" {
         out: *mut u64,
         scratch: *mut u64,
         canonical: i32,
+        alpha: *const u64,
     );
 }
 #[derive(Clone, Copy, Debug)]
@@ -318,7 +319,7 @@ impl Kernel {
         Self::Decode,
     ];
 }
-fn rust_batch<T: Element>(k: Kernel, a: &[T], b: &[T], out: &mut [T], scratch: &mut [T]) {
+fn rust_batch<T: Element>(k: Kernel, a: &[T], b: &[T], out: &mut [T], scratch: &mut [T], alpha: T) {
     if matches!(k, Kernel::BatchInverse | Kernel::BatchInverse4096) {
         let block = if matches!(k, Kernel::BatchInverse4096) {
             4096
@@ -332,45 +333,34 @@ fn rust_batch<T: Element>(k: Kernel, a: &[T], b: &[T], out: &mut [T], scratch: &
                 .zip(out.chunks_mut(block))
                 .zip(scratch.chunks_mut(block))
             {
-                rust_batch(k, a, b, o, s);
+                rust_batch(k, a, b, o, s, alpha);
             }
             return;
         }
     }
     let one = T::from_words([1, 0]);
     let zero = T::from_words([0, 0]);
-    let alpha = T::from_words([17, 19]);
-    match k {
-        Kernel::Add
-        | Kernel::Sub
-        | Kernel::Mul
-        | Kernel::Square
-        | Kernel::Inverse
-        | Kernel::Halve
-        | Kernel::Neg
-        | Kernel::Mixed
-        | Kernel::Fold
-        | Kernel::LiftFold
-        | Kernel::CanonicalRoundtrip
-        | Kernel::Copy => {
-            for ((&a, &b), o) in a.iter().zip(b).zip(out) {
-                *o = match k {
-                    Kernel::Add => a.add(b),
-                    Kernel::Sub => a.sub(b),
-                    Kernel::Mul => a.mul(b),
-                    Kernel::Square => a.square(),
-                    Kernel::Inverse => a.inverse(),
-                    Kernel::Halve => a.halve(),
-                    Kernel::Neg => a.neg(),
-                    Kernel::Mixed => a.mixed(b),
-                    Kernel::Fold => a.add(b.sub(a).mul(alpha)),
-                    Kernel::LiftFold => a.lift_fold(b),
-                    Kernel::CanonicalRoundtrip => T::from_words(a.words()),
-                    Kernel::Copy => a,
-                    _ => unreachable!(),
-                };
+    macro_rules! each {
+        ($x:ident,$y:ident,$body:expr) => {{
+            for ((&$x, &$y), o) in a.iter().zip(b).zip(out) {
+                let _ = $y;
+                *o = $body;
             }
-        }
+        }};
+    }
+    match k {
+        Kernel::Add => each!(x, y, x.add(y)),
+        Kernel::Sub => each!(x, y, x.sub(y)),
+        Kernel::Mul => each!(x, y, x.mul(y)),
+        Kernel::Square => each!(x, y, x.square()),
+        Kernel::Inverse => each!(x, y, x.inverse()),
+        Kernel::Halve => each!(x, y, x.halve()),
+        Kernel::Neg => each!(x, y, x.neg()),
+        Kernel::Mixed => each!(x, y, x.mixed(y)),
+        Kernel::Fold => each!(x, y, x.add(y.sub(x).mul(alpha))),
+        Kernel::LiftFold => each!(x, y, x.lift_fold(y, alpha)),
+        Kernel::CanonicalRoundtrip => each!(x, y, T::from_words(x.words())),
+        Kernel::Copy => out.copy_from_slice(a),
         Kernel::ChainMul => out[0] = a.iter().fold(one, |x, &y| x.mul(y)),
         Kernel::ChainSquare => {
             let mut x = a[0];
@@ -438,6 +428,7 @@ fn batch<T: Element>(
     out: &mut [T],
     scratch: &mut [T],
     canonical: bool,
+    alpha: T,
 ) {
     if T::FOURQ {
         assert_eq!(size_of::<T>(), 16 * T::DIM);
@@ -454,10 +445,11 @@ fn batch<T: Element>(
                 out.as_mut_ptr().cast(),
                 scratch.as_mut_ptr().cast(),
                 canonical as i32,
+                (&alpha as *const T).cast(),
             )
         };
     } else {
-        rust_batch(k, a, b, out, scratch)
+        rust_batch(k, a, b, out, scratch, alpha)
     }
 }
 fn canonical_hash<T: Element>(a: &[T]) -> String {
@@ -481,15 +473,104 @@ fn inputs(n: usize) -> (Vec<[u128; 2]>, Vec<[u128; 2]>) {
     let b = (0..n).map(|_| [next(), next()]).collect();
     (a, b)
 }
+fn challenge() -> [u128; 2] {
+    let bytes = blake3::derive_key("hyperfold-m127-compare/full-width-alpha-v2", &[0x57; 32]);
+    [0, 1].map(|j| {
+        Mersenne127::new(u128::from_le_bytes(
+            bytes[j * 16..(j + 1) * 16].try_into().unwrap(),
+        ))
+        .canonical()
+        .max(1)
+    })
+}
+// One explicit set of disjoint preallocated buffers, shared by resident timing
+// workers and the parallel correctness adapter; no hidden allocation.
+#[allow(clippy::too_many_arguments)]
+fn execute<T: Element>(
+    k: Kernel,
+    a: &[T],
+    b: &[T],
+    out: &mut [T],
+    scratch: &mut [T],
+    encoded: &mut [FqBase],
+    canonical_input: &[FqBase],
+    alpha: T,
+    canonical: bool,
+) {
+    match k {
+        Kernel::Encode => {
+            if T::FOURQ {
+                // FqBase/FqQuad and encoded limbs are explicitly16-aligned; the
+                // copy/encode branches do not access the unused scratch argument.
+                unsafe {
+                    fq_batch(
+                        16,
+                        2 * T::DIM,
+                        a.len(),
+                        a.as_ptr().cast(),
+                        a.as_ptr().cast(),
+                        encoded.as_mut_ptr().cast(),
+                        encoded.as_mut_ptr().cast(),
+                        1,
+                        (&alpha as *const T).cast(),
+                    )
+                };
+            } else {
+                for (&x, dst) in a.iter().zip(encoded.chunks_mut(T::DIM)) {
+                    for (&v, out) in x.words()[..T::DIM].iter().zip(dst) {
+                        *out = FqBase([v as u64, (v >> 64) as u64]);
+                    }
+                }
+            }
+        }
+        Kernel::Decode => {
+            if T::FOURQ {
+                unsafe {
+                    fq_batch(
+                        17,
+                        2 * T::DIM,
+                        out.len(),
+                        canonical_input.as_ptr().cast(),
+                        canonical_input.as_ptr().cast(),
+                        out.as_mut_ptr().cast(),
+                        out.as_mut_ptr().cast(),
+                        1,
+                        (&alpha as *const T).cast(),
+                    )
+                };
+            } else {
+                for (src, dst) in canonical_input.chunks(T::DIM).zip(out) {
+                    let mut words = [0u128; 2];
+                    for (j, x) in src.iter().enumerate() {
+                        words[j] = u128::from(x.0[0]) | (u128::from(x.0[1]) << 64);
+                    }
+                    *dst = T::from_words(words);
+                }
+            }
+        }
+        Kernel::BatchInverseAlloc => {
+            let mut allocated = vec![T::from_words([0, 0]); a.len()];
+            batch(
+                Kernel::BatchInverse,
+                a,
+                b,
+                out,
+                &mut allocated,
+                canonical,
+                alpha,
+            );
+        }
+        _ => batch(k, a, b, out, scratch, canonical, alpha),
+    }
+}
 struct Case<T: Element> {
     a: Vec<T>,
     b: Vec<T>,
     out: Vec<T>,
     scratch: Vec<T>,
-    worker_ns: Vec<u128>,
-    worker_ids: Vec<usize>,
     encoded: Vec<FqBase>,
     canonical_input: Vec<FqBase>,
+    alpha: T,
 }
 impl<T: Element> Case<T> {
     fn new(a: &[[u128; 2]], b: &[[u128; 2]]) -> Self {
@@ -498,8 +579,6 @@ impl<T: Element> Case<T> {
             b: b.iter().map(|&x| T::from_words(x)).collect(),
             out: vec![T::from_words([0, 0]); a.len()],
             scratch: vec![T::from_words([0, 0]); a.len()],
-            worker_ns: vec![0; 32],
-            worker_ids: vec![0; 32],
             encoded: vec![FqBase([0, 0]); a.len() * T::DIM],
             canonical_input: a
                 .iter()
@@ -510,6 +589,7 @@ impl<T: Element> Case<T> {
                     })
                 })
                 .collect(),
+            alpha: T::from_words(challenge()),
         }
     }
     fn result_hash(&self, k: Kernel) -> String {
@@ -525,102 +605,35 @@ impl<T: Element> Case<T> {
             canonical_hash(&self.out)
         }
     }
+    fn local_pass(&mut self, k: Kernel, canonical: bool) {
+        execute(
+            k,
+            black_box(&self.a),
+            black_box(&self.b),
+            &mut self.out,
+            &mut self.scratch,
+            &mut self.encoded,
+            &self.canonical_input,
+            self.alpha,
+            canonical,
+        );
+        black_box(&self.out);
+        black_box(&self.encoded);
+    }
+    // Functional checks only: timing uses the synchronous resident workers below.
     fn pass(&mut self, k: Kernel, canonical: bool) {
         let chunk = self.a.len() / 32;
-        black_box(&self.a);
-        black_box(&self.b);
-        if matches!(k, Kernel::Encode) {
-            self.encoded
-                .par_chunks_mut(chunk * T::DIM)
-                .zip(self.a.par_chunks(chunk))
-                .zip(self.worker_ns.par_iter_mut())
-                .zip(self.worker_ids.par_iter_mut())
-                .for_each(|(((o, a), elapsed), id)| {
-                    *id = rayon::current_thread_index().unwrap();
-                    let start = Instant::now();
-                    if T::FOURQ {
-                        // Encode writes canonical little-endian u64 limbs to repr(C),16-aligned output.
-                        unsafe {
-                            fq_batch(
-                                16,
-                                2 * T::DIM,
-                                a.len(),
-                                a.as_ptr().cast(),
-                                a.as_ptr().cast(),
-                                o.as_mut_ptr().cast(),
-                                o.as_mut_ptr().cast(),
-                                1,
-                            )
-                        };
-                    } else {
-                        for (&x, dst) in a.iter().zip(o.chunks_mut(T::DIM)) {
-                            for (&v, out) in x.words()[..T::DIM].iter().zip(dst) {
-                                *out = FqBase([v as u64, (v >> 64) as u64]);
-                            }
-                        }
-                    }
-                    *elapsed = start.elapsed().as_nanos();
-                });
-            black_box(&self.encoded);
-            return;
-        }
-        if matches!(k, Kernel::Decode) {
-            black_box(&self.canonical_input);
-            self.out
-                .par_chunks_mut(chunk)
-                .zip(self.canonical_input.par_chunks(chunk * T::DIM))
-                .zip(self.worker_ns.par_iter_mut())
-                .zip(self.worker_ids.par_iter_mut())
-                .for_each(|(((o, a), elapsed), id)| {
-                    *id = rayon::current_thread_index().unwrap();
-                    let start = Instant::now();
-                    if T::FOURQ {
-                        // Decode is a native limb copy; all source words are canonical by construction.
-                        unsafe {
-                            fq_batch(
-                                17,
-                                2 * T::DIM,
-                                o.len(),
-                                a.as_ptr().cast(),
-                                a.as_ptr().cast(),
-                                o.as_mut_ptr().cast(),
-                                o.as_mut_ptr().cast(),
-                                1,
-                            )
-                        };
-                    } else {
-                        for (src, dst) in a.chunks(T::DIM).zip(o) {
-                            let mut words = [0u128; 2];
-                            for (j, x) in src.iter().enumerate() {
-                                words[j] = u128::from(x.0[0]) | (u128::from(x.0[1]) << 64);
-                            }
-                            *dst = T::from_words(words);
-                        }
-                    }
-                    *elapsed = start.elapsed().as_nanos();
-                });
-            black_box(&self.out);
-            return;
-        }
+        let alpha = self.alpha;
         self.out
             .par_chunks_mut(chunk)
             .zip(self.scratch.par_chunks_mut(chunk))
             .zip(self.a.par_chunks(chunk))
             .zip(self.b.par_chunks(chunk))
-            .zip(self.worker_ns.par_iter_mut())
-            .zip(self.worker_ids.par_iter_mut())
-            .for_each(|(((((o, s), a), b), elapsed), id)| {
-                *id = rayon::current_thread_index().unwrap();
-                let start = Instant::now();
-                if matches!(k, Kernel::BatchInverseAlloc) {
-                    let mut allocated = vec![T::from_words([0, 0]); a.len()];
-                    batch(Kernel::BatchInverse, a, b, o, &mut allocated, canonical);
-                } else {
-                    batch(k, a, b, o, s, canonical);
-                }
-                *elapsed = start.elapsed().as_nanos();
+            .zip(self.encoded.par_chunks_mut(chunk * T::DIM))
+            .zip(self.canonical_input.par_chunks(chunk * T::DIM))
+            .for_each(|(((((o, s), a), b), encoded), input)| {
+                execute(k, a, b, o, s, encoded, input, alpha, canonical);
             });
-        black_box(&self.out);
     }
 }
 #[derive(Parser)]
@@ -642,75 +655,180 @@ struct Args {
     #[arg(long)]
     check_only: bool,
 }
+enum Job<T: Element> {
+    Init(Case<T>),
+    Run { kernel: Kernel, warmup: bool },
+    Stop,
+}
+struct WindowResult {
+    worker: usize,
+    passes: u64,
+    quantum: u64,
+    kernel_ns: u128,
+    wall_ns: u128,
+    hash: String,
+}
 fn measure<T: Element>(
     args: &Args,
     canonical: bool,
     out: &mut std::fs::File,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for &n in &args.sizes {
-        assert!(n >= 256 && n.is_power_of_two());
-        let (a, b) = inputs(n);
-        let mut c = Case::<T>::new(&a, &b);
-        let ih =
-            blake3::hash(format!("{}:{}", canonical_hash(&c.a), canonical_hash(&c.b)).as_bytes())
+    use std::sync::{Arc, Barrier, mpsc};
+    std::thread::scope(
+        |scope| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let ready = Arc::new(Barrier::new(33));
+            let go = Arc::new(Barrier::new(33));
+            let done = Arc::new(Barrier::new(33));
+            let (tx_result, rx_result) = mpsc::channel();
+            let mut senders = Vec::new();
+            for worker in 0..32 {
+                let (tx, rx) = mpsc::sync_channel(1);
+                senders.push(tx);
+                let (ready, go, done, results) =
+                    (ready.clone(), go.clone(), done.clone(), tx_result.clone());
+                scope.spawn(move || {
+                    let mut state: Option<Case<T>> = None;
+                    let mut quantum = 1u64;
+                    while let Ok(job) = rx.recv() {
+                        match job {
+                            Job::Init(c) => state = Some(c),
+                            Job::Stop => break,
+                            Job::Run { kernel, warmup } => {
+                                let c = state.as_mut().expect("initialized worker");
+                                if warmup {
+                                    c.out.fill(T::from_words([0, 0]));
+                                    let before = Instant::now();
+                                    c.local_pass(kernel, canonical);
+                                    quantum = (1_000_000 / before.elapsed().as_nanos().max(1))
+                                        .clamp(1, 4096)
+                                        as u64;
+                                }
+                                // Preparation and calibration finish before the master starts wall time.
+                                ready.wait();
+                                go.wait();
+                                let begin = Instant::now();
+                                let duration =
+                                    Duration::from_millis(if warmup { 20 } else { args.window_ms });
+                                let (mut passes, mut kernel_ns) = (0u64, 0u128);
+                                while begin.elapsed() < duration {
+                                    let block = Instant::now();
+                                    for _ in 0..quantum {
+                                        c.local_pass(kernel, canonical);
+                                    }
+                                    kernel_ns += block.elapsed().as_nanos();
+                                    passes += quantum;
+                                }
+                                let wall_ns = begin.elapsed().as_nanos();
+                                done.wait();
+                                // Canonical export/hash is strictly after all timed workers finish.
+                                let hash = c.result_hash(kernel);
+                                results
+                                    .send(WindowResult {
+                                        worker,
+                                        passes,
+                                        quantum,
+                                        kernel_ns,
+                                        wall_ns,
+                                        hash,
+                                    })
+                                    .expect("result reader");
+                            }
+                        }
+                    }
+                });
+            }
+            for &n in &args.sizes {
+                assert!(n >= 256 && n.is_power_of_two());
+                let (a, b) = inputs(n);
+                let whole = Case::<T>::new(&a, &b);
+                let ih = blake3::hash(
+                    format!(
+                        "{}:{}:{}",
+                        canonical_hash(&whole.a),
+                        canonical_hash(&whole.b),
+                        canonical_hash(&[whole.alpha])
+                    )
+                    .as_bytes(),
+                )
                 .to_hex()
                 .to_string();
-        for k in Kernel::ALL {
-            if !args.kernels.is_empty() && !args.kernels.iter().any(|x| x == &format!("{k:?}")) {
-                continue;
-            }
-            c.out.fill(T::from_words([0, 0]));
-            c.pass(k, canonical); // warmup; no timed record
-            for window in 1..=args.windows {
-                let begin = Instant::now();
-                let mut passes = 0u64;
-                let mut worker_sum = 0u128;
-                let mut thread_ns = [0u128; 32];
-                let mut thread_items = [0u64; 32];
-                while begin.elapsed() < Duration::from_millis(args.window_ms) {
-                    c.pass(k, canonical);
-                    passes += 1;
-                    worker_sum += c.worker_ns.iter().sum::<u128>();
-                    for j in 0..32 {
-                        thread_ns[c.worker_ids[j]] += c.worker_ns[j];
-                        thread_items[c.worker_ids[j]] += (n / 32) as u64;
+                drop(whole);
+                for (worker, tx) in senders.iter().enumerate() {
+                    tx.send(Job::Init(Case::<T>::new(
+                        &a[worker * n / 32..(worker + 1) * n / 32],
+                        &b[worker * n / 32..(worker + 1) * n / 32],
+                    )))?;
+                }
+                for kernel in Kernel::ALL {
+                    if !args.kernels.is_empty()
+                        && !args.kernels.iter().any(|x| x == &format!("{kernel:?}"))
+                    {
+                        continue;
+                    }
+                    for window in 0..=args.windows {
+                        for tx in &senders {
+                            tx.send(Job::Run {
+                                kernel,
+                                warmup: window == 0,
+                            })?;
+                        }
+                        ready.wait();
+                        let begin = Instant::now();
+                        go.wait();
+                        done.wait();
+                        let elapsed = begin.elapsed().as_secs_f64();
+                        let mut results = (0..32)
+                            .map(|_| rx_result.recv())
+                            .collect::<Result<Vec<_>, _>>()?;
+                        results.sort_by_key(|r| r.worker);
+                        if window == 0 {
+                            continue;
+                        }
+                        let passes = results.iter().map(|r| r.passes).sum::<u64>();
+                        let items = passes * (n / 32) as u64;
+                        let total_ns = results.iter().map(|r| r.kernel_ns).sum::<u128>();
+                        let mut hash = blake3::Hasher::new();
+                        for r in &results {
+                            hash.update(r.hash.as_bytes());
+                        }
+                        let list = |values: Vec<String>| values.join(";");
+                        writeln!(
+                            out,
+                            "{},{},{},{},32,{},{},{},{},{:.9},{:.6},{:.6},{},{},{},{},{},{},{}",
+                            args.backend,
+                            T::DIM,
+                            format_args!("{kernel:?}"),
+                            n,
+                            size_of::<T>(),
+                            window,
+                            passes,
+                            items,
+                            elapsed,
+                            elapsed * 1e9 / items as f64,
+                            total_ns as f64 / items as f64,
+                            ih,
+                            hash.finalize().to_hex(),
+                            list(results.iter().map(|r| r.kernel_ns.to_string()).collect()),
+                            list(
+                                results
+                                    .iter()
+                                    .map(|r| (r.passes * (n / 32) as u64).to_string())
+                                    .collect()
+                            ),
+                            list(results.iter().map(|r| r.passes.to_string()).collect()),
+                            list(results.iter().map(|r| r.wall_ns.to_string()).collect()),
+                            list(results.iter().map(|r| r.quantum.to_string()).collect())
+                        )?;
+                        out.flush()?;
                     }
                 }
-                let elapsed = begin.elapsed().as_secs_f64();
-                let hash = c.result_hash(k);
-                writeln!(
-                    out,
-                    "{},{},{},{},{},{},{},{},{},{:.9},{:.6},{:.6},{},{},{},{}",
-                    args.backend,
-                    T::DIM,
-                    format_args!("{k:?}"),
-                    n,
-                    32,
-                    size_of::<T>(),
-                    window,
-                    passes,
-                    passes * n as u64,
-                    elapsed,
-                    elapsed * 1e9 / (passes * n as u64) as f64,
-                    worker_sum as f64 / (passes * n as u64) as f64,
-                    ih,
-                    hash,
-                    thread_ns
-                        .iter()
-                        .map(u128::to_string)
-                        .collect::<Vec<_>>()
-                        .join(";"),
-                    thread_items
-                        .iter()
-                        .map(u64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(";")
-                )?;
-                out.flush()?;
             }
-        }
-    }
-    Ok(())
+            for tx in senders {
+                tx.send(Job::Stop)?;
+            }
+            Ok(())
+        },
+    )
 }
 fn check_kernels<A: Element, B: Element>(a: &[[u128; 2]], b: &[[u128; 2]], canonical: bool) {
     let mut x = Case::<A>::new(a, b);
@@ -803,6 +921,7 @@ fn correctness() {
     println!(
         "correctness:10000 random+boundary base/BigUint checks;16384-element all-kernel base/extension ark/FourQ native/canonical checks passed; ark no-carry=false"
     );
+    println!("challenge={:?}", challenge());
 }
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
@@ -834,9 +953,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .open(args.output.as_ref().ok_or("--output required")?)?;
     writeln!(
         file,
-        "backend,extension_degree,kernel,elements,threads,bytes_per_element,window,passes,work_items,elapsed_seconds,wall_ns_per_item,mean_worker_ns_per_item,input_hash,result_hash,thread_elapsed_ns,thread_work_items"
+        "backend,extension_degree,kernel,elements,threads,bytes_per_element,window,passes,work_items,elapsed_seconds,wall_ns_per_item,mean_worker_ns_per_item,input_hash,result_hash,thread_elapsed_ns,thread_work_items,thread_passes,thread_wall_ns,thread_quantum"
     )?;
-    pool.install(|| match args.backend.as_str() {
+    drop(pool);
+    match args.backend.as_str() {
         "ours" => {
             measure::<Mersenne127>(&args, true, &mut file)?;
             measure::<M127Quad>(&args, true, &mut file)
@@ -854,5 +974,5 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             measure::<FqQuad>(&args, true, &mut file)
         }
         _ => Err("unknown backend".into()),
-    })
+    }
 }

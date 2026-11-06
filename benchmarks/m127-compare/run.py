@@ -27,6 +27,16 @@ def main():
     parser.add_argument('--kernels', default='')
     parser.add_argument('--rounds', type=int, default=3)
     args = parser.parse_args()
+    assert args.rounds>=1
+    initial_affinity=sorted(os.sched_getaffinity(0))
+    physical={}
+    for cpu in initial_affinity:
+        topology=pathlib.Path(f'/sys/devices/system/cpu/cpu{cpu}/topology')
+        key=((topology/'physical_package_id').read_text().strip(),(topology/'core_id').read_text().strip())
+        physical.setdefault(key,cpu)
+    chosen=list(physical.values())[:32]
+    assert len(chosen)==32,'need32distinct physical cores for the controlled baseline'
+    os.sched_setaffinity(0,chosen)  # This controller/its children only; no host service settings.
     here = pathlib.Path(__file__).resolve().parent
     repo = here.parents[1]
     root = args.root.resolve()
@@ -34,6 +44,9 @@ def main():
     assert not any(root.iterdir()), 'new empty evidence directory required'
     binary = args.binary or here / 'target/release/hyperfold-m127-compare'
     shutil.copy2(binary, root / 'profile')
+    preflight=subprocess.check_output([str(root/'profile'),'--backend','ours','--check-only'],text=True)
+    (root/'preflight.log').write_text(preflight)
+    challenge=json.loads(next(line.removeprefix('challenge=') for line in preflight.splitlines() if line.startswith('challenge=')))
     variants = ['ours', 'ark', 'fourq-native', 'fourq-canonical']
     jobs = [(r+1, v) for r in range(args.rounds) for v in
             (variants[r % 4:] + variants[:r % 4])]
@@ -43,7 +56,11 @@ def main():
     manifest = dict(started_utc=utc(), source_commit=source,
                     source_status=command_text(['git', '-C', str(repo), 'status', '--short']),
                     binary_sha256=sha(root / 'profile'), sizes=args.sizes, kernels=args.kernels,
-                    threads=32, windows=5, window_ms=100, jobs=jobs,
+                    threads=32, windows=5, window_ms=100, jobs=jobs,timing_schema=2,
+                    resident_workers=32,warmup_ms_target=20,clock_quantum_target_ns=1000000,
+                    challenge_words=list(map(str,challenge)),
+                    challenge_derivation='blake3 derive_key context hyperfold-m127-compare/full-width-alpha-v2; seed57hex repeated32',
+                    result_hash_scheme='blake3 of32worker canonical hex hashes in worker-index order',
                     root_lock_sha256=sha(repo / 'Cargo.lock'), comparison_lock_sha256=sha(here / 'Cargo.lock'),
                     arithmetic_sha256=sha(repo/'src/field_m127.rs'),
                     plonky3_commit=command_text(['git','-C','/home/zjl/BinaryField-Bench/vendor/Plonky3','rev-parse','HEAD']),
@@ -57,7 +74,8 @@ def main():
                                   fourq/'FourQ_64bit_and_portable/FourQ_internal.h',
                                   fourq/'FourQ_64bit_and_portable/FourQ.h']},
                     hardware=command_text(['lscpu']), meminfo=pathlib.Path('/proc/meminfo').read_text(),
-                    affinity=sorted(os.sched_getaffinity(0)), hostname=os.uname().nodename,
+                    initial_affinity=initial_affinity,affinity=sorted(os.sched_getaffinity(0)), hostname=os.uname().nodename,
+                    process_affinity_changed=True,affinity_scope='this controller and descendants only;32distinct physical cores',
                     exclusive_host=False, host_settings_modified=False,
                     directive='c983b3c0-0511-4d4e-b7e3-180b247efe62',
                     plan='/home/zjl/zkp-research/notes/impl-plan-hyperfold-m127-performance.md')
@@ -100,7 +118,10 @@ def main():
             assert signatures.setdefault(key, fingerprint) == fingerprint, (case.name, key)
             assert r['threads'] == '32' and float(r['elapsed_seconds']) >= .1
             counts = list(map(int, r['thread_work_items'].split(';')))
-            assert len(counts) == 32 and sum(counts) == int(r['work_items'])
+            passes=list(map(int,r['thread_passes'].split(';')))
+            assert len(counts) == len(passes) == 32 and all(x>0 for x in passes)
+            assert counts==[p*int(r['elements'])//32 for p in passes]
+            assert sum(counts) == int(r['work_items']) and sum(passes)==int(r['passes'])
         statuses.append(status)
     (root/'finished.json').write_text(json.dumps(dict(finished_utc=utc(), processes=len(statuses),
                                                     recorded_windows=sum(2*len(args.sizes.split(','))*(len(args.kernels.split(',')) if args.kernels else 23)*5 for _ in statuses),

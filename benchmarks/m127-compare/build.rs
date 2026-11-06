@@ -47,6 +47,7 @@ fn main() {
         .compile("fourq_compare_x64_c");
     println!("cargo:rerun-if-env-changed=FOURQ_ROOT");
     println!("cargo:rerun-if-changed=fourq_batch.c");
+    println!("cargo:rerun-if-changed=fourq_kernel.h");
     for file in [
         "eccp2_core.c",
         "AMD64/fp_x64.h",

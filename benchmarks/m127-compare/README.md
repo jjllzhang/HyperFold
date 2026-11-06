@@ -29,11 +29,22 @@ compile time). Enabling the feature is not evidence that multiplication used
 the no-carry assembly implementation. No constant-time property is inferred:
 our current inverse and ark's binary-Euclidean inverse have different algorithms.
 
-All measured work uses a local **32-thread** pool. One-thread mode is accepted
-only with `--check-only`, for functional checks. Thirty-two tasks are scheduled
-on that pool; small tasks need not occupy all workers equally. Raw per-worker
-elapsed time and item counts disclose that distribution. Neither these durations
-nor aggregate wall throughput is an isolated single-thread latency measurement.
+All measured work uses **32 resident OS workers**, created once per field
+stage and synchronized before each window. Each worker repeats its local batches
+for at least100ms, rather than repeatedly dispatching short Rayon tasks. Inputs,
+conversion, preparation and calibration finish before the measured start. The
+master wall spans start/end barriers; worker kernel clocks cover calibrated
+blocks targeting1ms and exclude barriers, hashes and CSV/result collection.
+Raw per-worker passes, items, kernel time, wall time and clock quantum are kept.
+One-thread mode is accepted only with `--check-only`, for functional checks.
+Neither worker durations nor aggregate wall throughput is an isolated
+single-thread latency measurement.
+
+Fold/LiftFold use full-width nonzero base/extension challenges derived from a
+fixed seed with BLAKE3. Challenges are converted before timing and included in
+the input fingerprint; they are not small hardcoded multiplication constants.
+C has four specialized width/contract entries selected once per worker batch;
+field width and canonicalization do not cause per-element runtime dispatch.
 
 The three working sets contain 8192,32768,1048576 elements in total, or
 256,1024,32768 per task. Every element occupies 16 base /32 extension bytes in
@@ -77,13 +88,19 @@ Actual PCS zero/Option behavior is unchanged. Canonical output hashes must match
 across all compared implementations, workloads and independent process rounds.
 
 Formal runs rotate four variants over three independent process rounds (12
-processes); each kernel has a warmup plus five windows of at least100ms.
-Windows within one process are not independent processes. Wall time includes
-the common pool dispatch, worker clocks and collection of worker statistics;
-hashing, input generation, representation conversion, CSV writes and flushing
-are outside arithmetic timing. Workers' clocks include only their own kernel
-body. This shared host has no exclusive-core or fixed-frequency guarantee;
-affinity/NUMA settings are recorded rather than changed.
+processes); each kernel has calibration/warmup plus five windows of at least100ms.
+Windows within one process are not independent processes. `passes` is the sum
+of worker-local passes, so `work_items = passes * elements /32`. The output hash
+combines the32 worker canonical-output hashes in index order; each backend has
+exactly the same partitioning and must match. Copy is a separately reported
+control rather than a quantity to subtract blindly. No compilation/tests or
+large PCS runs overlap the measured processes.
+
+The runner chooses the first32distinct physical cores from its permitted CPU
+set and restricts only itself/descendants to that set. Exact CPU IDs, original
+mask and hardware topology are recorded; host-wide services/settings are not
+changed. This controls the process CPU set but grants no exclusive-core,
+fixed-frequency or per-worker permanent-core guarantee on the shared host.
 
 No arithmetic optimization or legacy lifetime removal belongs in the baseline
 commit. Performance tests and differential checks are not a security proof.
