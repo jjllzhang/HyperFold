@@ -301,7 +301,11 @@ def main():
             "fingerprint",
         ]:
             entry[k] = summary[0][k] if complete else ""
-        resource = (case / "resources.txt").read_text()
+        resource = (
+            (case / "resources.txt").read_text()
+            if (case / "resources.txt").exists()
+            else ""
+        )
         peak = re.search(r"Maximum resident set size \(kbytes\): (\d+)", resource)
         entry["peak_rss_gib"] = f"{int(peak[1])/2**20:.9f}" if peak else ""
         if complete:

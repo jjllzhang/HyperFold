@@ -1,6 +1,7 @@
 """Synthetic lifecycle/error evidence regressions; no PCS computation or timing study."""
 
 import csv, io, json, os, pathlib, signal, subprocess, sys, tarfile, tempfile, time, unittest
+import contextlib
 from unittest import mock
 import benchmark_evidence as evidence
 import run_unified
@@ -68,6 +69,12 @@ class MonitorPolicyTests(unittest.TestCase):
 
 class StoppedRunArchiveTests(unittest.TestCase):
     def test_default_failure_has_analyzable_attempted_prefix(self):
+        self.check_stopped_prefix(False)
+
+    def test_monitor_error_before_resource_creation_is_archived(self):
+        self.check_stopped_prefix(True)
+
+    def check_stopped_prefix(self, early_monitor_error):
         repo = pathlib.Path(__file__).resolve().parents[1]
         with (repo / "data/m127-parameters.csv").open() as source:
             params = list(csv.DictReader(source))
@@ -108,12 +115,17 @@ class StoppedRunArchiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="synthetic-stopped-run-") as d:
             root = pathlib.Path(d)
             binary = root / "fake-bench"
+            worker_action = (
+                "import time;time.sleep(60)" if early_monitor_error else "sys.exit(7)"
+            )
             binary.write_text(
                 "#!"
                 + sys.executable
                 + '\nimport sys\nif "--list" in sys.argv:print('
                 + repr(listing)
-                + ',end="")\nelse:sys.exit(7)\n'
+                + ',end="")\nelse:'
+                + worker_action
+                + "\n"
             )
             binary.chmod(0o755)
             evidence_root = root / "data"
@@ -144,7 +156,30 @@ class StoppedRunArchiveTests(unittest.TestCase):
                 "--repetitions",
                 "3",
             ]
-            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+
+            def inject_failure(command, case, policy):
+                with mock.patch.object(
+                    evidence,
+                    "available_bytes",
+                    side_effect=[
+                        2**40,
+                        RuntimeError("synthetic post-start monitor error"),
+                    ],
+                ):
+                    observed = evidence.monitor_command(command, case, policy)
+                # Force absent resources deterministically, independent of the
+                # scheduler's GNU-time startup ordering. No PCS work is run.
+                (case / "resources.txt").unlink(missing_ok=True)
+                return observed
+
+            monitor_patch = (
+                mock.patch.object(
+                    run_unified, "monitor_command", side_effect=inject_failure
+                )
+                if early_monitor_error
+                else contextlib.nullcontext()
+            )
+            with monitor_patch, mock.patch.object(sys, "argv", argv), mock.patch.object(
                 run_unified, "command_output", side_effect=command_output
             ), mock.patch.object(run_unified.os, "sched_setaffinity"):
                 with self.assertRaisesRegex(RuntimeError, "incomplete"):
@@ -159,11 +194,20 @@ class StoppedRunArchiveTests(unittest.TestCase):
                 (2, 1, 1),
             )
             self.assertEqual(finish["run_status"], "stopped")
-            self.assertEqual(finish["termination_reason"], "worker_failed")
+            self.assertEqual(
+                finish["termination_reason"],
+                "monitor_error" if early_monitor_error else "worker_failed",
+            )
             outcomes = evidence.rows(evidence_root / "results.csv")
             self.assertEqual(len(outcomes), 1)
             self.assertEqual(outcomes[0]["status"], "runtime_failed")
             self.assertEqual(outcomes[0]["proof_size_bytes"], "")
+            if early_monitor_error:
+                self.assertEqual(outcomes[0]["peak_rss_gib"], "")
+                case = next((evidence_root / "cases").iterdir())
+                observed = json.loads((case / "status.json").read_text())
+                self.assertEqual(observed["stop_reason"], "monitor_error")
+                self.assertEqual(outcomes[0]["exit_code"], str(observed["exit_code"]))
             for name in run_unified.METRICS:
                 self.assertEqual(outcomes[0][name + "_mean"], "")
                 self.assertEqual(outcomes[0][name + "_sample_sd"], "")
