@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-const SCHEMA: &str = "hyperfold-one-shot-bench-v1";
+const SCHEMA: &str = "hyperfold-pcs-bench-v2";
 #[derive(Parser, Debug)]
 #[command(
     about = "Fresh Setup, one-shot release and queried-row recovery; no legacy memory switches/resume"
@@ -126,18 +126,12 @@ fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
     ]
 }
 const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
-const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes,fingerprint,parameters_id,commitment_root,y0_hash,proof_hash,challenge_hash";
+const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes";
 fn proof_cells(r: &TrialRecord) -> Vec<String> {
     vec![
         r.commitment_bytes.to_string(),
         r.eval_proof_bytes.to_string(),
         (r.commitment_bytes + r.eval_proof_bytes).to_string(),
-        r.fingerprint.clone(),
-        r.parameters_id.clone(),
-        r.commitment_root.clone(),
-        r.y0_hash.clone(),
-        r.proof_hash.clone(),
-        r.challenge_hash.clone(),
     ]
 }
 fn fresh(path: &Path, header: &str) -> Result<BufWriter<File>> {
@@ -169,10 +163,7 @@ fn outputs(path: &Path) -> Result<(BufWriter<File>, BufWriter<File>)> {
     )?;
     let raw = fresh(
         &raw,
-        &format!(
-            "{ID},repetition,{},forward_capacity_elements,inverse_capacity_elements,released_witness_elements,released_witness_capacity,witness_release_level,witness_release_subround,{PROOF}",
-            METRICS.join(",")
-        ),
+        &format!("{ID},repetition,{},{PROOF}", METRICS.join(",")),
     )?;
     Ok((summary, raw))
 }
@@ -182,38 +173,16 @@ fn run<F: SampleBase, E: ExtensionField<F>>(
     summary: &mut impl Write,
     raw: &mut impl Write,
 ) -> Result<()> {
-    let mut reference = None;
     let mut samples = Vec::with_capacity(args.repetitions);
     let mut last = None;
     for repetition in 0..=args.repetitions {
         let r = run_trial::<F, E>(c)?;
-        if let Some(expected) = reference.as_ref() {
-            if expected != &r.fingerprint {
-                return Err("nondeterministic proof/transcript".into());
-            }
-        } else {
-            reference = Some(r.fingerprint.clone());
-        }
         if repetition == 0 {
             continue;
         }
         let mut row = identity(c, args);
         row.push(repetition.to_string());
         row.extend(r.metrics().map(|x| format!("{x:.6}")));
-        row.extend([
-            r.forward_capacity.to_string(),
-            r.inverse_capacity.to_string(),
-            r.timings.released_witness_elements.to_string(),
-            r.timings.released_witness_capacity.to_string(),
-            r.timings
-                .witness_release_round
-                .map(|v| v.0.to_string())
-                .unwrap_or_default(),
-            r.timings
-                .witness_release_round
-                .map(|v| v.1.to_string())
-                .unwrap_or_default(),
-        ]);
         row.extend(proof_cells(&r));
         writeln!(raw, "{}", row.join(","))?;
         raw.flush()?;

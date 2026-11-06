@@ -1,4 +1,8 @@
 //! Fixed old-native proof/transcript references; the exercised path is now owned.
+//! Source 7bd0724311aed8b98aaaf889d40b16d83e13f0ba; seeds 17/18/19;
+//! native-retained borrowed opening before memory-policy removal. The fingerprint
+//! domain and post-challenge label below reproduce that fixed reference; do not
+//! regenerate this CSV to accept changes to the protocol.
 use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
