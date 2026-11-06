@@ -109,22 +109,69 @@ fn name(c: HyperFoldConfig) -> String {
         c.base_field, c.backend, c.mu, c.r, c.c
     )
 }
-fn output(path: &PathBuf, resume: bool, header: &str) -> std::io::Result<BufWriter<File>> {
+fn output(
+    path: &PathBuf,
+    resume: bool,
+    header: &str,
+    fresh_only: bool,
+) -> std::io::Result<BufWriter<File>> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
     let existing = resume && path.exists() && path.metadata()?.len() > 0;
-    let file = FileOptions::new()
-        .create(true)
-        .write(true)
-        .append(resume)
-        .truncate(!resume)
-        .open(path)?;
+    let file = if fresh_only {
+        // Atomic no-clobber even if a path appears after the pair preflight.
+        FileOptions::new().write(true).create_new(true).open(path)?
+    } else {
+        FileOptions::new()
+            .create(true)
+            .write(true)
+            .append(resume)
+            .truncate(!resume)
+            .open(path)?
+    };
     let mut w = BufWriter::new(file);
     if !existing {
         writeln!(w, "{header}")?;
     }
     Ok(w)
+}
+/// Preflight both destinations before creating either, then use atomic no-clobber.
+fn prepare_outputs(args: &Args) -> std::io::Result<(BufWriter<File>, BufWriter<File>)> {
+    let fresh_only = args.first_tree_strategy.is_some();
+    if fresh_only {
+        for path in [&args.output, &args.output.with_extension("raw.csv")] {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("recovered output must be new: {}", path.display()),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let results = output(
+        &args.output,
+        args.resume,
+        &format!(
+            "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms{}",
+            strategy_header(args)
+        ),
+        fresh_only,
+    )?;
+    let raw = output(
+        &args.output.with_extension("raw.csv"),
+        args.resume,
+        &format!(
+            "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms{}",
+            strategy_header(args)
+        ),
+        fresh_only,
+    )?;
+    Ok((results, raw))
 }
 type Measurements = (f64, f64, f64, usize, usize, f64, String);
 type BenchError = Box<dyn std::error::Error + Send + Sync>;
@@ -346,22 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         Vec::new()
     };
-    let mut results = output(
-        &args.output,
-        args.resume,
-        &format!(
-            "field,backend,mu,r,c,status,mu0,extension_degree,queries,threads,repetitions,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,proof_size_bytes,proof_size_kb,estimated_gib,security_scope,low_memory,diagonal_transition_ms{}",
-            strategy_header(&args)
-        ),
-    )?;
-    let mut raw = output(
-        &args.output.with_extension("raw.csv"),
-        args.resume,
-        &format!(
-            "field,backend,mu,r,c,mu0,extension_degree,queries,repetition,certified_iop,estimated_gib,commit_time_ms,open_time_ms,verify_time_ms,commitment_bytes,eval_proof_bytes,setup_time_ms,low_memory,diagonal_transition_ms{}",
-            strategy_header(&args)
-        ),
-    )?;
+    let (mut results, mut raw) = prepare_outputs(&args)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build()?;
@@ -493,6 +525,49 @@ mod tests {
         let mut args = args;
         args.resume = true;
         assert!(validate_modes(&args).is_err());
+    }
+    #[test]
+    fn recovered_existing_summary_or_raw_is_never_modified() {
+        for (index, which) in ["summary", "raw", "both"].iter().enumerate() {
+            let directory = std::env::temp_dir().join(format!(
+                "hyperfold-fresh-output-{}-{index}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("results.csv");
+            let raw = path.with_extension("raw.csv");
+            if *which != "raw" {
+                std::fs::write(&path, b"original-summary\n").unwrap();
+            }
+            if *which != "summary" {
+                std::fs::write(&raw, b"original-raw\n").unwrap();
+            }
+            let args = Args::try_parse_from([
+                "bench",
+                "--memory-mode",
+                "retained",
+                "--first-tree-strategy",
+                "recovered",
+                "--output",
+                path.to_str().unwrap(),
+            ])
+            .unwrap();
+            assert!(prepare_outputs(&args).is_err());
+            if *which != "raw" {
+                assert_eq!(std::fs::read(&path).unwrap(), b"original-summary\n");
+            } else {
+                assert!(!path.exists());
+            }
+            if *which != "summary" {
+                assert_eq!(std::fs::read(&raw).unwrap(), b"original-raw\n");
+            } else {
+                assert!(!raw.exists());
+            }
+            // Test the atomic safeguard independently of the pair preflight.
+            let occupied = if *which == "raw" { &raw } else { &path };
+            assert!(output(occupied, false, "replacement", true).is_err());
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
     #[test]
     fn ranges_and_resource_estimate() {
