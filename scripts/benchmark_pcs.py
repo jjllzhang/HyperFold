@@ -1,141 +1,125 @@
 #!/usr/bin/env python3
-"""Run independent 32-thread PCS cases, or summarize v2 raw CSV without running them."""
+"""Update four PCS result tables after complete, independent 32-thread batches."""
 
 import argparse
 import csv
-import hashlib
-import json
+import io
+import math
 import os
 from pathlib import Path
-import platform
-import re
 import shutil
 import signal
 import statistics
 import subprocess
+import sys
 import tempfile
-from datetime import datetime, timezone
 
-SCHEMA = "hyperfold-pcs-bench-v2"
-METRICS = (
-    "setup_ms",
-    "input_ms",
-    "commit_ms",
-    "forward_release_ms",
-    "open_ms",
-    "verify_ms",
-    "serialization_ms",
-    "cleanup_ms",
-    "wall_ms",
-    "online_total_ms",
-)
+SCHEMA = "hyperfold-pcs-bench-v2"  # Internal Rust CLI input, not the result table.
+COLUMNS = ["mu", "r", "c", "commit_ms", "open_ms", "verify_ms", "proof_bytes"]
+METRICS = COLUMNS[3:6]
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def read_csv(path):
-    with Path(path).open(newline="") as f:
-        return list(csv.DictReader(f))
+def read_csv(path, columns=None):
+    with Path(path).open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        if columns is not None and reader.fieldnames != columns:
+            raise ValueError(f"unexpected result header: {path}")
+        return list(reader)
 
 
-def write_csv(path, records):
-    keys = list(dict.fromkeys(k for row in records for k in row))
-    with Path(path).open("w", newline="") as f:
-        if keys:
-            writer = csv.DictWriter(f, keys)
-            writer.writeheader()
-            writer.writerows(records)
+def config_key(row):
+    return tuple(int(row[key]) for key in COLUMNS[:3])
 
 
-def summarize(records):
-    """Group complete raw repetitions by case; failed processes have no aggregates."""
-    groups = {}
-    for row in records:
-        if row["schema_version"] != SCHEMA:
-            raise ValueError("expected v2 benchmark CSV")
-        if "process_status" not in row:
-            raise ValueError(
-                "use the runner's combined raw CSV with process exit-status labels"
-            )
-        if row["process_status"] != "measured":
-            continue
-        identity = {
-            k: v
-            for k, v in row.items()
-            if k not in METRICS
-            and k
-            not in (
-                "repetition",
-                "process_status",
-                "commitment_bytes",
-                "eval_proof_bytes",
-                "proof_size_bytes",
-            )
-        }
-        groups.setdefault(tuple(identity.items()), []).append(row)
-    output = []
-    for key, rows in groups.items():
-        result = dict(key, status="measured", measured_repetitions=len(rows))
-        for metric in METRICS:
-            values = [float(row[metric]) for row in rows]
-            result[metric + "_mean"] = f"{statistics.fmean(values):.6f}"
-            result[metric + "_sample_sd"] = (
-                f"{statistics.stdev(values) if len(values) > 1 else 0:.6f}"
-            )
-        for field in ("commitment_bytes", "eval_proof_bytes", "proof_size_bytes"):
-            result[field] = rows[-1][field]
-        output.append(result)
-    return output
+def result_path(root, job):
+    field, code = job["field"].lower(), job["backend"].lower()
+    if field not in ("goldilocks", "m127") or code not in ("qa", "rs"):
+        raise ValueError("unknown field/code in benchmark selection")
+    return root / f"{field}-{code}.csv"
 
 
-def run_process(command, directory, observation=None):
-    """GNU time observes RSS; all interruption paths reap our own process group."""
-    resource = directory / "resources.txt"
-    proc = None
+def update_result(path, result):
+    """Replace one configuration atomically, preserving all other value strings."""
+    records = {}
+    if path.exists():
+        for row in read_csv(path, COLUMNS):
+            key = config_key(row)
+            if key in records:
+                raise ValueError(f"duplicate configuration in {path}: {key}")
+            records[key] = row
+    records[config_key(result)] = result
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
     try:
-        with (directory / "stdout.log").open("w") as stdout, (
-            directory / "stderr.log"
-        ).open("w") as stderr:
-            proc = subprocess.Popen(
-                [
-                    "/usr/bin/time",
-                    "-f",
-                    "peak_rss_kib=%M",
-                    "-o",
-                    str(resource),
-                    *command,
-                ],
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-            )
-            returncode = proc.wait()
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            writer = csv.DictWriter(stream, COLUMNS, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(records[key] for key in sorted(records))
+        os.replace(temporary, path)
     finally:
-        if proc is not None:
-            # A nonzero leader exit can leave descendants alive as well.
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def run_process(command):
+    """Reap this workload's process group on completion, failure or interruption."""
+    proc = subprocess.Popen(command, start_new_session=True)
+    try:
+        return proc.wait()
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        finally:
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        text = resource.read_text() if resource.exists() else ""
-        match = re.search(r"^peak_rss_kib=(\d+)$", text, re.MULTILINE)
-        rss = int(match[1]) if match else ""
-        if observation is not None and proc is not None:
-            observation.update(exit_code=proc.returncode, peak_rss_kib=rss)
-    return returncode, rss
+
+
+def read_round(path, job, round_number, repetitions):
+    rows = read_csv(path)
+    if len(rows) != repetitions or {int(row["repetition"]) for row in rows} != set(
+        range(1, repetitions + 1)
+    ):
+        raise ValueError("incomplete formal repetitions")
+    for row in rows:
+        if (
+            row["schema_version"] != SCHEMA
+            or config_key(row) != config_key(job)
+            or row["field"].lower() != job["field"].lower()
+            or row["backend"].lower() != job["backend"].lower()
+            or int(row["trial_round"]) != round_number
+        ):
+            raise ValueError("unexpected benchmark case or schema")
+    return rows
+
+
+def batch_result(job, samples):
+    result = {key: str(int(job[key])) for key in COLUMNS[:3]}
+    for metric in METRICS:
+        values = [float(row[metric]) for row in samples]
+        if any(not math.isfinite(value) or value < 0 for value in values):
+            raise ValueError("invalid measured time")
+        result[metric] = f"{statistics.fmean(values):.9f}"
+    sizes = {int(row["proof_size_bytes"]) for row in samples}
+    if len(sizes) != 1 or next(iter(sizes)) <= 0:
+        raise ValueError("expected one positive proof size for this fixed-input batch")
+    result["proof_bytes"] = str(next(iter(sizes)))
+    return result
 
 
 def run(args):
-    root = args.output_dir.resolve()
-    root.mkdir(parents=True)  # An existing directory is never reused.
-    checkout = Path(__file__).resolve().parents[1]
     physical = {}
     for cpu in sorted(os.sched_getaffinity(0)):
         topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
@@ -145,84 +129,34 @@ def run(args):
         )
         physical.setdefault(core, cpu)
     os.sched_setaffinity(0, list(physical.values())[:32])
-    metadata = {
-        "schema_version": SCHEMA,
-        "role": args.role,
-        "started_utc": datetime.now(timezone.utc).isoformat(),
-        "source_commit": args.source_commit,
-        "build_flags": args.build_flags,
-        "compiler": args.compiler,
-        "machine": platform.platform(),
-        "cpu_model": next(
-            (
-                line.split(":", 1)[1].strip()
-                for line in Path("/proc/cpuinfo").read_text().splitlines()
-                if line.startswith("model name")
-            ),
-            "unknown",
-        ),
-        "cpu_affinity": sorted(os.sched_getaffinity(0)),
-        "exclusive_host": False,
-        "threads": 32,
-        "warmup": 1,
-        "repetitions": args.repetitions,
-        "rounds": args.rounds,
-        "seeds": {"setup": 42, "message": 27, "point": 28},
-        "certificate": "hfc-tight-total100-gold-m127-v3-2026-11-05",
-        "setup": "fresh_per_trial",
-        "parameters": "forward_released_after_commit",
-        "witness": "consumed_after_first_lifted_fold",
-        "first_tree": "query_row_recovery",
-        "proof_size": "commitment_plus_evaluation_proof",
-        "online_scope": "commit+forward_release+open+verify",
-        "wall_scope": "fresh Setup/input/commit/release/open/verify/serialization/cleanup; CSV IO excluded",
-        "parameter_sha256": {
-            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (checkout / "data").glob("*.csv")
-        },
-        "processes": [],
-        "planned_processes": 0,
-        "termination_reason": None,
-    }
-    summaries, raw_all, jobs = [], [], []
-    try:
-        with tempfile.TemporaryDirectory(prefix="hyperfold-benchmark-") as temporary:
-            binary = Path(temporary) / "bench"
-            shutil.copy2(args.binary.resolve(), binary)
-            metadata["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-            selection = [
-                "--threads",
-                "32",
-                "--fields",
-                args.fields,
-                "--backends",
-                args.backends,
-                "--mu",
-                args.mu,
-                "--r",
-                args.r,
-                "--c",
-                args.c,
-            ]
-            listing = subprocess.check_output(
-                [str(binary), "--list", *selection], text=True
-            )
-            (root / "selected.csv").write_text(listing)
-            selected = read_csv(root / "selected.csv")
-            jobs = [
-                dict(row, trial_round=str(n + 1))
-                for n in range(args.rounds)
-                for row in selected
-            ]
-            metadata["planned_processes"] = len(jobs)
-            for job in jobs:
-                directory = (
-                    root
-                    / "cases"
-                    / f'{job["field"]}-{job["backend"]}-mu{job["mu"]}-r{job["r"]}-c{job["c"]}-round{job["trial_round"]}'
-                )
-                directory.mkdir(parents=True)
-                output = directory / "results.csv"
+    failed = False
+    with tempfile.TemporaryDirectory(prefix="hyperfold-benchmark-") as temporary:
+        root = Path(temporary)
+        binary = root / "bench"
+        shutil.copy2(args.binary.resolve(), binary)
+        selection = [
+            "--threads",
+            "32",
+            "--fields",
+            args.fields,
+            "--backends",
+            args.backends,
+            "--mu",
+            args.mu,
+            "--r",
+            args.r,
+            "--c",
+            args.c,
+        ]
+        listing = subprocess.check_output(
+            [str(binary), "--list", *selection], text=True
+        )
+        jobs = list(csv.DictReader(io.StringIO(listing)))
+        for index, job in enumerate(jobs):
+            path = result_path(args.output_dir, job)
+            samples = []
+            for round_number in range(1, args.rounds + 1):
+                output = root / f"case-{index}-round-{round_number}.csv"
                 command = [
                     str(binary),
                     "--fields",
@@ -238,88 +172,48 @@ def run(args):
                     "--threads",
                     "32",
                     "--trial-round",
-                    job["trial_round"],
+                    str(round_number),
                     "--repetitions",
                     str(args.repetitions),
                     "--output",
                     str(output),
                 ]
-                entry = dict(
-                    job,
-                    command=command,
-                    status="runtime_failed",
-                    exit_code="",
-                    peak_rss_kib="",
-                )
-                metadata["processes"].append(entry)
-                case_raw = []
-                raw = output.with_suffix(".raw.csv")
-                try:
-                    code, rss = run_process(command, directory, entry)
-                    entry.update(exit_code=code, peak_rss_kib=rss)
-                    case_raw = read_csv(raw) if raw.exists() else []
-                    if code == 0:
-                        if len(case_raw) != args.repetitions:
-                            raise ValueError(
-                                "incomplete raw repetitions after successful exit"
-                            )
-                        summaries.extend(
-                            summarize(
-                                [
-                                    dict(row, process_status="measured")
-                                    for row in case_raw
-                                ]
-                            )
-                        )
-                        entry["status"] = "measured"
-                finally:
-                    if not case_raw and raw.exists():
-                        case_raw = read_csv(raw)
-                    raw_all.extend(
-                        dict(row, process_status=entry["status"]) for row in case_raw
+                code = run_process(command)
+                if code:
+                    print(
+                        f"benchmark failed: {path.name} {config_key(job)}, round {round_number}, exit {code}",
+                        file=sys.stderr,
                     )
-                    if entry["status"] != "measured":
-                        failed = dict(
-                            job, status="runtime_failed", measured_repetitions=0
-                        )
-                        failed.update(
-                            {
-                                f"{m}_{stat}": ""
-                                for m in METRICS
-                                for stat in ("mean", "sample_sd")
-                            }
-                        )
-                        failed.update(
-                            commitment_bytes="",
-                            eval_proof_bytes="",
-                            proof_size_bytes="",
-                        )
-                        summaries.append(failed)
-                if entry["status"] != "measured" and not args.continue_on_failure:
-                    metadata["termination_reason"] = "process_failed"
+                    failed = True
                     break
-    except BaseException as error:
-        metadata["termination_reason"] = type(error).__name__ + ": " + str(error)
-        raise
-    finally:
-        metadata["attempted_processes"] = len(metadata["processes"])
-        metadata["unattempted_processes"] = len(jobs) - len(metadata["processes"])
-        metadata["finished_utc"] = datetime.now(timezone.utc).isoformat()
-        write_csv(root / "results.csv", summaries)
-        write_csv(root / "raw-samples.csv", raw_all)
-        (root / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    return 1 if any(p["status"] != "measured" for p in metadata["processes"]) else 0
+                samples.extend(
+                    read_round(
+                        output.with_suffix(".raw.csv"),
+                        job,
+                        round_number,
+                        args.repetitions,
+                    )
+                )
+            else:
+                result = batch_result(job, samples)
+                if args.role == "protocol_performance":
+                    update_result(path, result)
+                    print(f"updated {path.name}: {config_key(job)}")
+                continue
+            if not args.continue_on_failure:
+                break
+    return 1 if failed else 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, default=ROOT / "target/release/bench")
     parser.add_argument(
-        "--summarize",
+        "--output-dir",
         type=Path,
-        help="read the runner combined raw CSV and print process summaries; no workload",
+        default=ROOT / "results",
+        help="read/update the four field/code CSVs here",
     )
-    parser.add_argument("--binary", type=Path)
-    parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--fields", default="goldilocks,m127")
     parser.add_argument("--backends", default="qa,rs")
     parser.add_argument("--mu", default="20..=30")
@@ -328,38 +222,23 @@ def main():
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--continue-on-failure", action="store_true")
-    parser.add_argument("--role", default="protocol_performance")
     parser.add_argument(
-        "--source-commit",
-        default="unknown",
-        help="source of the supplied binary, not inferred from its path",
-    )
-    parser.add_argument("--build-flags", default="unknown")
-    parser.add_argument(
-        "--compiler",
-        default="unknown",
-        help="compiler used to build the supplied binary",
+        "--role",
+        choices=["protocol_performance", "functional_smoke", "synthetic_test"],
+        default="protocol_performance",
+        help="only protocol_performance updates result files",
     )
     args = parser.parse_args()
-    if args.summarize:
-        import sys
-
-        rows = summarize(read_csv(args.summarize))
-        if rows:
-            writer = csv.DictWriter(sys.stdout, list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
-        return 0
-    if (
-        not args.binary
-        or not args.output_dir
-        or args.repetitions < 1
-        or args.rounds < 1
-    ):
-        parser.error(
-            "binary, new output directory and positive repetitions/rounds required"
-        )
-    return run(args)
+    if args.repetitions < 1 or args.rounds < 1:
+        parser.error("positive repetitions and rounds required")
+    try:
+        return run(args)
+    except KeyboardInterrupt:
+        print("benchmark interrupted", file=sys.stderr)
+        return 130
+    except Exception as error:
+        print(f"benchmark error: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
