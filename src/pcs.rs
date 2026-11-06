@@ -34,6 +34,86 @@ pub struct CommitData<F> {
     pub tree: Tree<F>,
     root: Digest,
 }
+/// Top-level commitment storage, kept by the caller through verification and
+/// serialization. Splitting CommitData moves its allocations without copying them.
+#[derive(Debug)]
+pub struct CommittedOracle<F> {
+    tree: Tree<F>,
+    root: Digest,
+}
+/// A message witness associated with exactly one committed oracle. Moving this
+/// into open_once permits its allocation to be freed after the first subround.
+#[derive(Debug)]
+pub struct OwnedWitness<F> {
+    message: Vec<F>,
+    root: Digest,
+}
+impl<F> OwnedWitness<F> {
+    pub fn values(&self) -> &[F] {
+        &self.message
+    }
+}
+impl<F> CommitData<F> {
+    pub fn into_parts(self) -> (CommittedOracle<F>, OwnedWitness<F>) {
+        (
+            CommittedOracle {
+                tree: self.tree,
+                root: self.root,
+            },
+            OwnedWitness {
+                message: self.message,
+                root: self.root,
+            },
+        )
+    }
+}
+enum WitnessSource<'a, F> {
+    Borrowed(&'a [F]),
+    Owned(Vec<F>),
+}
+impl<F> WitnessSource<'_, F> {
+    fn values(&self) -> &[F] {
+        match self {
+            Self::Borrowed(values) => values,
+            Self::Owned(values) => values,
+        }
+    }
+    fn release_owned(&mut self) -> (usize, usize) {
+        match self {
+            Self::Borrowed(_) => (0, 0),
+            Self::Owned(values) => {
+                let removed = std::mem::take(values);
+                let allocation = (removed.len(), removed.capacity());
+                drop(removed);
+                allocation
+            }
+        }
+    }
+}
+struct ProverInput<'a, F> {
+    tree: &'a Tree<F>,
+    root: Digest,
+    witness: WitnessSource<'a, F>,
+}
+impl<'a, F> ProverInput<'a, F> {
+    fn borrowed(data: &'a CommitData<F>) -> Self {
+        Self {
+            tree: &data.tree,
+            root: data.root,
+            witness: WitnessSource::Borrowed(&data.message),
+        }
+    }
+    fn owned(oracle: &'a CommittedOracle<F>, witness: OwnedWitness<F>) -> Result<Self> {
+        if oracle.root != witness.root {
+            return Err(Error::Proof("witness/oracle binding"));
+        }
+        Ok(Self {
+            tree: &oracle.tree,
+            root: oracle.root,
+            witness: WitnessSource::Owned(witness.message),
+        })
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "E: Serialize",
@@ -70,11 +150,17 @@ pub enum FirstTreeStrategy {
     PrehashedRetained,
     PrehashedRecovered,
 }
-/// Optional coarse profiling: one timer for the first tree's query extraction,
-/// including row recovery (if selected), multiproof extraction and compression.
+/// Optional coarse profiling of first-tree query extraction and owned-witness
+/// release. All measured work remains inside opening time.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenTimings {
     pub first_tree_query: Duration,
+    /// Included in open; zero for the original borrowed-witness APIs.
+    pub witness_release: Duration,
+    pub released_witness_elements: usize,
+    pub released_witness_capacity: usize,
+    /// (folding level, zero-based sumcheck subround).
+    pub witness_release_round: Option<(usize, usize)>,
 }
 #[derive(Debug)]
 pub struct HyperFoldPcs<F, E> {
@@ -84,6 +170,100 @@ pub struct HyperFoldPcs<F, E> {
     pub h: LocalMatrix<F>,
     pub diagonals: DiagonalTables<F>,
     _extension: PhantomData<E>,
+}
+/// Parameters after their final commitment. Only inverse diagonals remain;
+/// recommitting or restoring forward storage is not part of this type's API.
+///
+/// ```compile_fail
+/// use hyperfold_pcs::{pcs::OpeningOnlyPcs, field_m127::{Mersenne127, M127Quad}};
+/// fn cannot_commit(pcs: OpeningOnlyPcs<Mersenne127, M127Quad>) {
+///     pcs.commit(vec![]);
+/// }
+/// ```
+/// ```compile_fail
+/// use hyperfold_pcs::{pcs::OpeningOnlyPcs, field_m127::{Mersenne127, M127Quad}};
+/// fn cannot_restore(mut pcs: OpeningOnlyPcs<Mersenne127, M127Quad>) {
+///     pcs.prepare_commit();
+/// }
+/// ```
+#[derive(Debug)]
+pub struct OpeningOnlyPcs<F, E> {
+    inner: HyperFoldPcs<F, E>,
+}
+impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> OpeningOnlyPcs<F, E> {
+    /// Allocated forward/inverse diagonal capacities, in base-field elements.
+    pub fn diagonal_capacities(&self) -> (usize, usize) {
+        (
+            self.inner
+                .diagonals
+                .levels
+                .iter()
+                .map(|l| l.forward.capacity())
+                .sum(),
+            self.inner
+                .diagonals
+                .levels
+                .iter()
+                .map(|l| l.inverse.capacity())
+                .sum(),
+        )
+    }
+    /// Consume only the witness; the caller retains the oracle until after verify.
+    ///
+    /// ```compile_fail
+    /// use hyperfold_pcs::{pcs::{OpeningOnlyPcs, Commitment, CommittedOracle, OwnedWitness},
+    ///     field_m127::{Mersenne127 as F, M127Quad as E}};
+    /// fn cannot_reuse(pcs: OpeningOnlyPcs<F,E>, cm: Commitment<E>, oracle: CommittedOracle<F>,
+    ///                 witness: OwnedWitness<F>, z: Vec<E>, y:E) {
+    ///     pcs.open_once(&cm, &oracle, witness, &z, y).unwrap();
+    ///     pcs.open_once(&cm, &oracle, witness, &z, y).unwrap();
+    /// }
+    /// ```
+    pub fn open_once(
+        &self,
+        cm: &Commitment<E>,
+        oracle: &CommittedOracle<F>,
+        witness: OwnedWitness<F>,
+        z: &[E],
+        y: E,
+    ) -> Result<(Proof<F, E>, Transcript)> {
+        self.inner.open_internal(
+            cm,
+            ProverInput::owned(oracle, witness)?,
+            z,
+            y,
+            FirstTreeStrategy::PrehashedRecovered,
+            None,
+        )
+    }
+    pub fn open_once_profiled(
+        &self,
+        cm: &Commitment<E>,
+        oracle: &CommittedOracle<F>,
+        witness: OwnedWitness<F>,
+        z: &[E],
+        y: E,
+    ) -> Result<(Proof<F, E>, Transcript, OpenTimings)> {
+        let mut timings = OpenTimings::default();
+        let (proof, transcript) = self.inner.open_internal(
+            cm,
+            ProverInput::owned(oracle, witness)?,
+            z,
+            y,
+            FirstTreeStrategy::PrehashedRecovered,
+            Some(&mut timings),
+        )?;
+        Ok((proof, transcript, timings))
+    }
+    pub fn verify(
+        &self,
+        cm: &Commitment<E>,
+        z: &[E],
+        y: E,
+        proof: &Proof<F, E>,
+    ) -> Result<Transcript> {
+        self.inner.verify(cm, z, y, proof)
+    }
 }
 impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E> {
     pub fn setup(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
@@ -121,6 +301,19 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             diagonals,
             _extension: PhantomData,
         })
+    }
+    /// Consume parameters after their last commitment, retaining the inverses
+    /// already computed by Setup. This does no resampling or inversion.
+    pub fn into_opening_only(mut self) -> Result<OpeningOnlyPcs<F, E>> {
+        if !self.diagonals.has_inverse() {
+            return Err(Error::Config(
+                "opening-only transition requires precomputed inverses",
+            ));
+        }
+        for level in &mut self.diagonals.levels {
+            drop(std::mem::take(&mut level.forward));
+        }
+        Ok(OpeningOnlyPcs { inner: self })
     }
     /// Setup conversion only; benchmark separately from commit/open.
     pub fn prepare_commit(&mut self) {
@@ -202,7 +395,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         } else {
             FirstTreeStrategy::NativeRetained
         };
-        self.open_internal(cm, data, z, y, strategy, None)
+        self.open_internal(cm, ProverInput::borrowed(data), z, y, strategy, None)
     }
     /// Open with a typed storage strategy, without profiling clocks.
     pub fn open_with_strategy(
@@ -213,7 +406,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         y: E,
         strategy: FirstTreeStrategy,
     ) -> Result<(Proof<F, E>, Transcript)> {
-        self.open_internal(cm, data, z, y, strategy, None)
+        self.open_internal(cm, ProverInput::borrowed(data), z, y, strategy, None)
     }
     /// Diagnostics only: all clocks and extraction work remain inside open time.
     pub fn open_profiled(
@@ -225,23 +418,34 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         strategy: FirstTreeStrategy,
     ) -> Result<(Proof<F, E>, Transcript, OpenTimings)> {
         let mut timings = OpenTimings::default();
-        let (proof, transcript) =
-            self.open_internal(cm, data, z, y, strategy, Some(&mut timings))?;
+        let (proof, transcript) = self.open_internal(
+            cm,
+            ProverInput::borrowed(data),
+            z,
+            y,
+            strategy,
+            Some(&mut timings),
+        )?;
         Ok((proof, transcript, timings))
     }
     fn open_internal(
         &self,
         cm: &Commitment<E>,
-        data: &CommitData<F>,
+        input: ProverInput<'_, F>,
         z: &[E],
         y: E,
         strategy: FirstTreeStrategy,
         mut timings: Option<&mut OpenTimings>,
     ) -> Result<(Proof<F, E>, Transcript)> {
+        let ProverInput {
+            tree: top_tree,
+            root: prover_root,
+            mut witness,
+        } = input;
         if !self.diagonals.has_inverse() {
             return Err(Error::Config("call prepare_open for inverse diagonals"));
         }
-        if cm.root != data.root || data.message.len() != self.config.k() {
+        if cm.root != prover_root || witness.values().len() != self.config.k() {
             return Err(Error::Proof("prover data mismatch"));
         }
         let (mut t, z0, gamma) = self.eval_prefix(cm, z, y)?;
@@ -263,7 +467,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             for s in 0..config.nu() {
                 let first = i == d && s == 0;
                 let g = if first {
-                    sumcheck::round_values(&data.message, &weights, stride)
+                    sumcheck::round_values(witness.values(), &weights, stride)
                 } else {
                     sumcheck::round_values(&f, &weights, stride)
                 };
@@ -274,7 +478,18 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 let a = t.sample::<F, E>(b"sumcheck-alpha");
                 running = sumcheck::eval_round(g, a);
                 if first {
-                    f = sumcheck::fold_table(&data.message, stride, a);
+                    f = sumcheck::fold_table(witness.values(), stride, a);
+                    // Only the owning API drops this Vec. All later subrounds use f.
+                    if matches!(witness, WitnessSource::Owned(_)) {
+                        let start = timings.is_some().then(Instant::now);
+                        let (len, capacity) = witness.release_owned();
+                        if let Some(timing) = timings.as_mut() {
+                            timing.witness_release = start.unwrap().elapsed();
+                            timing.released_witness_elements = len;
+                            timing.released_witness_capacity = capacity;
+                            timing.witness_release_round = Some((i, s));
+                        }
+                    }
                 } else {
                     sumcheck::fold_table_in_place(&mut f, stride, a);
                 }
@@ -292,7 +507,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                     first_beta = Some(b);
                 }
                 let next = if i == d {
-                    let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
+                    let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 } else if let Some(matrix) = first_dense.as_ref() {
                     fold_level(config, &self.h, &self.diagonals, matrix, i, &b)
@@ -315,7 +530,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 let first = trees.is_empty();
                 let (root, tree) = if first && strategy == FirstTreeStrategy::PrehashedRecovered {
                     let digests = mmcs::hash_leaves(&next);
-                    let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
+                    let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
                     let matrix = RecoveredFirstMatrix::new(
                         config,
                         matrices[0],
@@ -350,7 +565,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         f.shrink_to_fit();
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
-        let top = mmcs::open(&data.tree, &top_indices);
+        let top = mmcs::open(top_tree, &top_indices);
         let mut inner: Vec<Option<CompressedOpening<E>>> = (0..d - 1).map(|_| None).collect();
         let compress_opening = |pos: usize, indices: &[usize], o: Opening<E>| {
             let i = d - 1 - pos;
@@ -386,7 +601,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             }
         }
         if rebuild {
-            let matrices = mmcs::mmcs::<F>().get_matrices(&data.tree);
+            let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
             let next = fold_level(
                 config,
                 &self.h,
@@ -583,4 +798,84 @@ fn project(q: &[usize], n: usize) -> Vec<usize> {
     x.sort_unstable();
     x.dedup();
     x
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::field_m127::{M127Quad, Mersenne127};
+    use crate::params::BaseCodeKind;
+    use p3_field::PrimeCharacteristicRing;
+    #[test]
+    fn opening_only_moves_allocations_and_retains_identical_inverses() {
+        type F = Mersenne127;
+        type E = M127Quad;
+        let cfg = HyperFoldConfig::testing(F::KIND, BaseCodeKind::Qa, 8, 2, 4, 4, 2).unwrap();
+        let pcs = HyperFoldPcs::<F, E>::setup(cfg, [123; 32]).unwrap();
+        let inverses: Vec<_> = pcs
+            .diagonals
+            .levels
+            .iter()
+            .map(|l| l.inverse.clone())
+            .collect();
+        let message: Vec<_> = (0..cfg.k()).map(F::from_usize).collect();
+        let pointer = message.as_ptr();
+        let (_, data) = pcs.commit(message).unwrap();
+        let top_pointer = mmcs::mmcs::<F>().get_matrices(&data.tree)[0]
+            .values
+            .as_ptr();
+        let (oracle, witness) = data.into_parts();
+        assert_eq!(pointer, witness.values().as_ptr());
+        assert_eq!(
+            top_pointer,
+            mmcs::mmcs::<F>().get_matrices(&oracle.tree)[0]
+                .values
+                .as_ptr()
+        );
+        let only = pcs.into_opening_only().unwrap();
+        for (level, inverse) in only.inner.diagonals.levels.iter().zip(inverses) {
+            assert_eq!(level.forward.len(), 0);
+            assert_eq!(level.forward.capacity(), 0);
+            assert_eq!(level.inverse, inverse);
+        }
+        assert!(only.inner.diagonals.has_inverse());
+        assert!(!only.inner.diagonals.has_forward());
+        let low = HyperFoldPcs::<F, E>::setup_low_memory(cfg, [123; 32]).unwrap();
+        assert!(low.into_opening_only().is_err());
+    }
+    #[test]
+    fn owning_witness_release_deallocates_and_error_paths_drop_owned_values() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Tracked(Arc<AtomicUsize>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut values = Vec::with_capacity(16);
+        for _ in 0..8 {
+            values.push(Tracked(drops.clone()));
+        }
+        let mut source = WitnessSource::Owned(values);
+        assert_eq!(source.release_owned(), (8, 16));
+        assert_eq!(drops.load(Ordering::Relaxed), 8);
+        match source {
+            WitnessSource::Owned(values) => assert_eq!(values.capacity(), 0),
+            _ => unreachable!(),
+        }
+        let error = || -> Result<()> {
+            let _input = WitnessSource::Owned(vec![Tracked(drops.clone()), Tracked(drops.clone())]);
+            Err(Error::Proof("intentional early failure"))
+        };
+        assert!(error().is_err());
+        assert_eq!(drops.load(Ordering::Relaxed), 10);
+        let original = [17, 23];
+        let mut borrowed = WitnessSource::Borrowed(&original);
+        assert_eq!(borrowed.release_owned(), (0, 0));
+        assert_eq!(borrowed.values(), &original);
+    }
 }
