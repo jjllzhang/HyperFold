@@ -31,6 +31,10 @@ pub trait Engine: Copy + Clone + Default + fmt::Debug + Eq + Hash + Send + Sync 
     fn square(a: Self::Repr) -> Self::Repr;
     fn inverse(a: Self::Repr) -> Self::Repr;
     fn halve(a: Self::Repr) -> Self::Repr;
+    fn qadd(a: [Self::Repr; 2], b: [Self::Repr; 2]) -> [Self::Repr; 2];
+    fn qsub(a: [Self::Repr; 2], b: [Self::Repr; 2]) -> [Self::Repr; 2];
+    fn qneg(a: [Self::Repr; 2]) -> [Self::Repr; 2];
+    fn qhalve(a: [Self::Repr; 2]) -> [Self::Repr; 2];
     fn qmul(a: [Self::Repr; 2], b: [Self::Repr; 2]) -> [Self::Repr; 2];
     fn qsquare(a: [Self::Repr; 2]) -> [Self::Repr; 2];
     fn qinverse(a: [Self::Repr; 2]) -> [Self::Repr; 2];
@@ -223,21 +227,21 @@ impl<B: Engine> Add for Quad<B> {
     type Output = Self;
     #[inline]
     fn add(self, b: Self) -> Self {
-        Self([self.0[0] + b.0[0], self.0[1] + b.0[1]])
+        Self::wrap(B::qadd(self.repr(), b.repr()))
     }
 }
 impl<B: Engine> Sub for Quad<B> {
     type Output = Self;
     #[inline]
     fn sub(self, b: Self) -> Self {
-        Self([self.0[0] - b.0[0], self.0[1] - b.0[1]])
+        Self::wrap(B::qsub(self.repr(), b.repr()))
     }
 }
 impl<B: Engine> Neg for Quad<B> {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
-        Self([-self.0[0], -self.0[1]])
+        Self::wrap(B::qneg(self.repr()))
     }
 }
 impl<B: Engine> Mul for Quad<B> {
@@ -296,7 +300,7 @@ impl<B: Engine> PrimeCharacteristicRing for Quad<B> {
     }
     #[inline]
     fn halve(&self) -> Self {
-        Self([self.0[0].halve(), self.0[1].halve()])
+        Self::wrap(B::qhalve(self.repr()))
     }
 }
 impl<B: Engine> Packable for Quad<B> {}

@@ -17,6 +17,10 @@ unsafe extern "C" {
     fn hf_fq_neg(a: *const Limbs, c: *mut Limbs);
     fn hf_fq_inverse(a: *const Limbs, c: *mut Limbs);
     fn hf_fq_halve(a: *const Limbs, c: *mut Limbs);
+    fn hf_fq_qadd(a: *const [Limbs; 2], b: *const [Limbs; 2], c: *mut [Limbs; 2]);
+    fn hf_fq_qsub(a: *const [Limbs; 2], b: *const [Limbs; 2], c: *mut [Limbs; 2]);
+    fn hf_fq_qneg(a: *const [Limbs; 2], c: *mut [Limbs; 2]);
+    fn hf_fq_qhalve(a: *const [Limbs; 2], c: *mut [Limbs; 2]);
     fn hf_fq_qmul(a: *const [Limbs; 2], b: *const [Limbs; 2], c: *mut [Limbs; 2]);
     fn hf_fq_qsquare(a: *const [Limbs; 2], c: *mut [Limbs; 2]);
     fn hf_fq_qinverse(a: *const [Limbs; 2], c: *mut [Limbs; 2]);
@@ -90,6 +94,34 @@ impl Engine for FourQ {
         let mut c = Self::ZERO;
         // SAFETY: live 16-byte input/output, disjoint; nonzero inverse enforced by Field.
         unsafe { hf_fq_halve(&a, &mut c) };
+        c
+    }
+    #[inline]
+    fn qadd(a: [Limbs; 2], b: [Limbs; 2]) -> [Limbs; 2] {
+        let mut c = [Self::ZERO; 2];
+        // SAFETY: fixed C-layout 32-byte arrays are initialized, aligned and disjoint.
+        unsafe { hf_fq_qadd(&a, &b, &mut c) };
+        c
+    }
+    #[inline]
+    fn qsub(a: [Limbs; 2], b: [Limbs; 2]) -> [Limbs; 2] {
+        let mut c = [Self::ZERO; 2];
+        // SAFETY: fixed C-layout 32-byte arrays are initialized, aligned and disjoint.
+        unsafe { hf_fq_qsub(&a, &b, &mut c) };
+        c
+    }
+    #[inline]
+    fn qneg(a: [Limbs; 2]) -> [Limbs; 2] {
+        let mut c = [Self::ZERO; 2];
+        // SAFETY: fixed C-layout 32-byte arrays are initialized, aligned and disjoint.
+        unsafe { hf_fq_qneg(&a, &mut c) };
+        c
+    }
+    #[inline]
+    fn qhalve(a: [Limbs; 2]) -> [Limbs; 2] {
+        let mut c = [Self::ZERO; 2];
+        // SAFETY: fixed C-layout 32-byte arrays are initialized, aligned and disjoint.
+        unsafe { hf_fq_qhalve(&a, &mut c) };
         c
     }
     #[inline]

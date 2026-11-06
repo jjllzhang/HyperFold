@@ -16,6 +16,9 @@ blake3 = "1.8.4"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["alloc"] }
 
+p3-commit = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/commit" }
+p3-matrix = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/matrix" }
+
 [build-dependencies]
 cc = "1"
 

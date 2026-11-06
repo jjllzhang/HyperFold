@@ -78,6 +78,27 @@ impl Engine for Ark {
         a * MontFp!("85070591730234615865843651857942052864")
     }
     #[inline]
+    fn qadd(a: [AF; 2], b: [AF; 2]) -> [AF; 2] {
+        let c = AE::new(a[0], a[1]) + AE::new(b[0], b[1]);
+        [c.c0, c.c1]
+    }
+    #[inline]
+    fn qsub(a: [AF; 2], b: [AF; 2]) -> [AF; 2] {
+        let c = AE::new(a[0], a[1]) - AE::new(b[0], b[1]);
+        [c.c0, c.c1]
+    }
+    #[inline]
+    fn qneg(a: [AF; 2]) -> [AF; 2] {
+        let c = -AE::new(a[0], a[1]);
+        [c.c0, c.c1]
+    }
+    #[inline]
+    fn qhalve(a: [AF; 2]) -> [AF; 2] {
+        let mut c = AE::new(a[0], a[1]);
+        c.mul_assign_by_fp(&MontFp!("85070591730234615865843651857942052864"));
+        [c.c0, c.c1]
+    }
+    #[inline]
     fn qmul(a: [AF; 2], b: [AF; 2]) -> [AF; 2] {
         let c = AE::new(a[0], a[1]) * AE::new(b[0], b[1]);
         [c.c0, c.c1]

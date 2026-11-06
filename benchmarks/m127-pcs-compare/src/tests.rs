@@ -108,6 +108,9 @@ fn differential<B: Engine>() {
     assert_eq!(t1, t2);
     for x in [P, u128::MAX] {
         assert!(codec::decode::<Base<B>>(&x.to_le_bytes(), 16).is_err());
+        let mut bad = x.to_le_bytes().to_vec();
+        bad.extend([0; 16]);
+        assert!(codec::decode::<Quad<B>>(&bad, 32).is_err());
     }
 }
 #[test]
@@ -132,16 +135,73 @@ fn fourq_redundant_zero_and_layout() {
     assert_eq!(p.try_inverse(), None);
     same(p, z);
     assert_eq!(p.to_string(), "0");
+    let reference = |a: Q| F::new(a.canonical());
+    let closed = |a: Q| {
+        let limbs = a.0.0;
+        let raw = limbs[0] as u128 | ((limbs[1] as u128) << 64);
+        assert!(raw <= P);
+    };
     for a in [p, z, Q::ONE, Q::NEG_ONE, Q::new(P - 2)] {
         for b in [p, z, Q::ONE, Q::NEG_ONE] {
-            for v in [a + b, a - b, a * b, -a, a.square(), a.halve()] {
-                let limbs = v.0.0;
-                let raw = limbs[0] as u128 | ((limbs[1] as u128) << 64);
-                assert!(raw <= P);
-                same(v, F::new(raw));
+            let x = reference(a);
+            let y = reference(b);
+            for (actual, expected) in [
+                (a + b, x + y),
+                (a - b, x - y),
+                (a * b, x * y),
+                (-a, -x),
+                (a.square(), x.square()),
+                (a.halve(), x.halve()),
+            ] {
+                closed(actual);
+                same(actual, expected);
+            }
+            same(a.try_inverse(), x.try_inverse());
+            if let Some(i) = a.try_inverse() {
+                closed(i);
             }
         }
     }
+    let values = [
+        Quad([p, z]),
+        Quad([z, p]),
+        Quad([p, p]),
+        Quad([Q::ONE, p]),
+        Quad([p, Q::ONE]),
+        Quad([Q::NEG_ONE, p]),
+        Quad([p, Q::new(P - 2)]),
+    ];
+    for a in values {
+        for b in values {
+            let x = E::new(a.0.map(reference));
+            let y = E::new(b.0.map(reference));
+            for (actual, expected) in [
+                (a + b, x + y),
+                (a - b, x - y),
+                (a * b, x * y),
+                (-a, -x),
+                (a.square(), x.square()),
+                (a.halve(), x.halve()),
+                (a * b.0[0], x * reference(b.0[0])),
+            ] {
+                for c in actual.0 {
+                    closed(c);
+                }
+                same(actual, expected);
+            }
+            same(a.try_inverse(), x.try_inverse());
+            if let Some(i) = a.try_inverse() {
+                for c in i.0 {
+                    closed(c);
+                }
+                assert_eq!(a * i, QQ::ONE);
+            }
+        }
+    }
+    let inverse = QQ::ONE.inverse();
+    assert_eq!(inverse, QQ::ONE);
+    same(inverse, E::ONE);
+    assert_eq!(inverse.0[1].0.0, [u64::MAX, u64::MAX >> 1]);
     for a in [
         Quad::<fourq::FourQ>([p, z]),
         Quad::<fourq::FourQ>([p, p]),
@@ -252,6 +312,8 @@ fn pcs_cross_backend_and_thread_agreement() {
                     let reference = one.install(|| generate::<F, E>(cfg));
                     let a = parallel.install(|| generate::<A, AQ>(cfg));
                     let q = parallel.install(|| generate::<Q, QQ>(cfg));
+                    assert_eq!(a, one.install(|| generate::<A, AQ>(cfg)));
+                    assert_eq!(q, one.install(|| generate::<Q, QQ>(cfg)));
                     assert_eq!(reference, a);
                     assert_eq!(reference, q);
                     for b in [&reference, &a, &q] {
@@ -265,4 +327,52 @@ fn pcs_cross_backend_and_thread_agreement() {
             }
         }
     }
+}
+
+fn ragged<F: SampleBase>() -> Vec<Vec<u8>> {
+    use p3_commit::Mmcs;
+    use p3_matrix::{Dimensions, dense::RowMajorMatrix};
+    let m = hyperfold_pcs::mmcs::mmcs::<F>();
+    let mut evidence = Vec::new();
+    for heights in [[16, 4, 4, 8], [4, 4, 8, 16], [8, 16, 4, 4]] {
+        let matrices = heights
+            .iter()
+            .enumerate()
+            .map(|(j, &h)| {
+                RowMajorMatrix::new(
+                    (0..h * (j + 1)).map(|v| F::from_usize(v + 17)).collect(),
+                    j + 1,
+                )
+            })
+            .collect();
+        let dims = heights
+            .iter()
+            .enumerate()
+            .map(|(j, &h)| Dimensions {
+                height: h,
+                width: j + 1,
+            })
+            .collect::<Vec<_>>();
+        let (root, tree) = m.commit(matrices);
+        let indices = [1, 2, 7, 8, 15];
+        let (values, paths) = m.open_multi_batch(&indices, &tree);
+        m.verify_multi_batch(&root, &dims, &indices, &values, &paths)
+            .unwrap();
+        let mut bad = paths.clone();
+        bad.sibling_hashes[0][0] ^= 1;
+        assert!(
+            m.verify_multi_batch(&root, &dims, &indices, &values, &bad)
+                .is_err()
+        );
+        evidence.push(bytes(&paths));
+        evidence.push(bytes(&values));
+    }
+    evidence
+}
+#[test]
+fn ragged_multi_batch_canonical_proofs_match() {
+    assert_eq!(ragged::<F>(), ragged::<A>());
+    assert_eq!(ragged::<F>(), ragged::<Q>());
+    assert_eq!(align_of::<A>(), 8);
+    assert_eq!(align_of::<AQ>(), 8);
 }

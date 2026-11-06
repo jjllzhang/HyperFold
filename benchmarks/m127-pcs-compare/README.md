@@ -5,12 +5,12 @@ Experimental package only: production field arithmetic, protocol and Plonky3 sta
 | Operation | ours_frozen | ark_adapter | fourq_native_adapter |
 |---|---|---|---|
 | Base add/sub/mul/neg/square/inverse | Existing Rust M127 | ark-ff 0.6.0 native Fp128 Montgomery | Dedicated scalar C bridge to matching FourQ routine |
-| Base halve | Existing Rust | Native multiplication by constant inverse 2 | Native fpmul1271 by constant 2^126 |
-| E add/sub/neg/halve | Existing P3 extension | Native coefficient operations | Native coefficient operations |
+| Base halve | Existing Rust | Native multiplication by constant inverse 2 | Native fpdiv1271 |
+| E add/sub/neg/halve | Existing P3 extension | Native Fp2 add/sub/neg and native mixed multiply by inverse 2 | Native fp2add/sub/neg/div1271 in one bridge |
 | E mul/square/inverse | Existing P3 extension | Native ark Fp2 operations | Native fp2mul1271/fp2sqr1271/fp2inv1271 |
 | E mixed multiply | Existing P3 | ark Fp2 mul_assign_by_fp | Two native fpmul1271 calls inside one C bridge |
 
-Ark coefficients stay Montgomery internally. E explicitly owns `[Base; 2]`; basis borrowing does not reinterpret the ark Fp2 layout. FourQ uses explicit C-layout `[u64;2]` limbs, retains redundant zero `p` internally, and canonicalizes at wire/Hash/Ord/Display boundaries. Eq and zero detection recognize both zeros. Zero inverse returns None before entering C. External decoding rejects values >=p. No full canonical table clone. Native range closure is subject to the independent Theorist audit before formal timing.
+Ark coefficients stay Montgomery internally. E explicitly owns `[Base; 2]`; basis borrowing does not reinterpret the ark Fp2 layout. FourQ uses explicit C-layout `[u64;2]` limbs, retains redundant zero `p` internally, and canonicalizes at wire/Hash/Ord/Display boundaries. Eq and zero detection recognize both zeros. Zero inverse returns None before entering C. External decoding rejects values >=p. No full canonical table clone. Theorist independently confirmed per-operation [0,p] closure for this fixed Linux/AMD64 UINT128 C/noASM path (Raft message 4b4e2f56). This does not extend to arbitrary u128 inputs or other FourQ implementations.
 
 Both adapted base types occupy 16 bytes and E 32 bytes. Ark alignment is library-dependent; FourQ alignment is 16. Scalar packing in all cases. FourQ has one scalar FFI crossing per corresponding field operation (or coefficient operation), with no runtime operation/degree dispatcher. This real integration cost stays inside PCS timings. No cross-language LTO, custom ASM or bulk PCS fusion. FourQ is MIT, fixed commit `1031567f23278e1135b35cc04e5d74c2ac88c029`, selected x64 C/noASM/noAVX macros; upstream is no longer maintained. Ark is a generic same-prime Montgomery instantiation, not a specialized named M127 backend. Its all-ones modulus does not enable the no-carry Montgomery fast path.
 
