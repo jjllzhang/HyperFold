@@ -232,3 +232,8 @@ strategy, B−A for construction-entry changes, and C−B for storage/recovery w
 same constructor. Report the three independent process means and their variation,
 not nine independent processes per strategy. These new diagnostics do not alter
 the 142-case official baseline or establish an exact mu30 overhead.
+
+A/B query the first tree before the remaining intermediate trees, while C queries
+it after they are opened and released. The first-tree sub-timing therefore also
+reflects query ordering and cache state. Use total open for the net strategy
+comparison; the sub-timing is not an isolated row-fold arithmetic measurement.
