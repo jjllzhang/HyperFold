@@ -1,0 +1,31 @@
+{
+  "root_release_tests_per_build": 33,
+  "compile_fail_per_build": 3,
+  "builds": [
+    "ordinary",
+    "target-cpu=native"
+  ],
+  "clippy_both": true,
+  "rustdoc": true,
+  "adapter_tests_per_build": 5,
+  "python_regressions": 11,
+  "golden_configurations": 96,
+  "golden_functional_thread_counts": [
+    1,
+    32
+  ],
+  "golden_comparisons": 192,
+  "functional_smoke_processes": 24,
+  "warmup_per_process": 1,
+  "measured_functional_trials_per_process": 1,
+  "archive_csv_byte_exact": [
+    "results.csv",
+    "raw-samples.csv"
+  ],
+  "all24_commitment_proof_challenge_fingerprints_equal_pre_cleanup": true,
+  "arithmetic_unchanged_sha256": "26c423cde3de04c362fe1d08e0747e410c506c5f4bcc34cd1297f8f9f174e576",
+  "execution_source": "1e90f870622f81c0da365d4e51d3131105dfd75c",
+  "role": "functional cleanup validation; not new comparative performance measurements",
+  "largest_cases_rerun_in_this_cleanup": false,
+  "full72_rerun": false
+}
