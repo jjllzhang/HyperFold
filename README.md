@@ -35,6 +35,11 @@ all incomplete timing and proof-size measurements are blank. Real memory traces,
 exit records, global OOM-counter observations and portable analysis are included.
 No recomputation was used, and the 142 previously measured cases are unchanged.
 
+The separate [first-tree rebuilding comparison](experiments/recompute-overhead-2026-11-06/REPORT.md)
+measures a 31.453%–38.822% opening-time increase at four fitting M127 settings
+(μ=24/26, r=2, c=4). Both Setup table directions stay live in this comparison;
+it does not establish an exact μ=30 overhead. The official 142-case data is unchanged.
+
 The [earlier guarded snapshot](experiments/retained-2026-11-06/REPORT.md) remains
 available as historical evidence of the 12 GiB available-memory policy.
 

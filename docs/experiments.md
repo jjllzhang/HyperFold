@@ -193,3 +193,6 @@ It reports descriptive opening-time deltas, sample standard deviations and
 process RSS. These fitting-size observations do not establish the exact overhead
 at mu30, where the full-retention baseline failed. The comparison measures the
 net effect of the rebuilding strategy, including its changed working set.
+
+The completed [paired measurements and raw evidence](../experiments/recompute-overhead-2026-11-06/REPORT.md)
+contain eight processes, 24 raw samples and four matching proof/transcript fingerprints.

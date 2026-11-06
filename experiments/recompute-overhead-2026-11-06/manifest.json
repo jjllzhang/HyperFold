@@ -1,0 +1,61 @@
+{
+  "started_utc": "2026-11-06T06:35:53.713001+00:00",
+  "binary_sha256": "7101f468c38de0ad40e7f17bd2acd7af1fb85d4bcc860a24fc53c270de12c29c",
+  "source_commit": "68c1272949fd46dbc684457ee46819dac56dcfec",
+  "source_status": "",
+  "field": "M127",
+  "r": 2,
+  "c": 4,
+  "threads": 32,
+  "warmup": 1,
+  "repetitions": 3,
+  "diagonals": "both directions retained; no conversions",
+  "commitments": "one common commitment per process, outside open timer",
+  "setup_seed_byte": 42,
+  "message_seed_byte": 27,
+  "point_seed_byte": 28,
+  "strategy_order": [
+    [
+      24,
+      "qa",
+      "retained"
+    ],
+    [
+      24,
+      "qa",
+      "rebuild"
+    ],
+    [
+      24,
+      "rs",
+      "rebuild"
+    ],
+    [
+      24,
+      "rs",
+      "retained"
+    ],
+    [
+      26,
+      "qa",
+      "rebuild"
+    ],
+    [
+      26,
+      "qa",
+      "retained"
+    ],
+    [
+      26,
+      "rs",
+      "retained"
+    ],
+    [
+      26,
+      "rs",
+      "rebuild"
+    ]
+  ],
+  "build_flags": "-C target-cpu=native",
+  "scope": "diagnostic opening-strategy comparison; official sweep data unchanged"
+}
