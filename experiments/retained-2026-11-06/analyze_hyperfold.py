@@ -41,6 +41,7 @@ def main():
     parser.add_argument('--root', required=True, type=pathlib.Path)
     parser.add_argument('--output', required=True, type=pathlib.Path)
     parser.add_argument('--repo', type=pathlib.Path, default=pathlib.Path('/home/zjl/HyperFold'))
+    parser.add_argument('--parameter-dir', type=pathlib.Path, help='Versioned CSV/SHA256SUMS directory; defaults to repo/data')
     args = parser.parse_args()
     root, out = args.root.resolve(), args.output.resolve()
     if not (root / 'final-finished.json').exists():
@@ -49,12 +50,34 @@ def main():
     assert (root / 'actual-attempt-exit-status').read_text().strip() == '0'
     summary = json.loads((root / 'final-finished.json').read_text())
     manifest = json.loads((root / 'manifest.json').read_text())
-    with (root / 'bench').open('rb') as stream:
-        assert hashlib.file_digest(stream, 'sha256').hexdigest() == manifest['contract']['binary_sha256']
-    expected = list(csv.DictReader(io.StringIO(subprocess.check_output([
-        str(root / 'bench'), '--list', '--memory-mode', 'retained', '--max-estimated-gib', '1024'
-    ], text=True))))
-    expected = {key(r): r for r in expected}
+    parameter_dir = args.parameter_dir or args.repo / 'data'
+    if not parameter_dir.exists():
+        parameter_dir = pathlib.Path(__file__).resolve().parent / 'parameters'
+    expected = {}
+    for label, filename in (('Goldilocks', 'goldilocks-parameters.csv'), ('M127', 'm127-parameters.csv')):
+        for row in read_csv(parameter_dir / filename):
+            assert row['target_bits'] == '100' and row['selection_profile'] == 'uniform'
+            assert row['analysis_only'].lower() == 'false'
+            assert row['certificate_version'] == 'hfc-tight-total100-gold-m127-v3-2026-11-05'
+            backend = 'Qa' if row['backend'].lower().startswith('qa') else 'Rs'
+            record = dict(field=label, backend=backend, mu=row['mu'], r=row['r'], c=row['c'],
+                          mu0=row['mu0'], extension_degree=row['extension_degree'], queries=row['queries'])
+            assert key(record) not in expected
+            expected[key(record)] = record
+    for line in (parameter_dir / 'SHA256SUMS').read_text().splitlines():
+        digest, filename = line.split('  ', 1)
+        with (parameter_dir / filename).open('rb') as stream:
+            assert hashlib.file_digest(stream, 'sha256').hexdigest() == digest
+    # The evidence archive excludes executables. Validate its recorded hash if the
+    # original binary is available; portable data analysis uses the exact CSVs.
+    if (root / 'bench').exists():
+        with (root / 'bench').open('rb') as stream:
+            assert hashlib.file_digest(stream, 'sha256').hexdigest() == manifest['contract']['binary_sha256']
+        compiled = list(csv.DictReader(io.StringIO(subprocess.check_output([
+            str(root / 'bench'), '--list', '--memory-mode', 'retained', '--max-estimated-gib', '1024'
+        ], text=True))))
+        assert {key(r): {k: r[k] for k in ('mu0','extension_degree','queries')} for r in compiled} == {
+            k: {field: v[field] for field in ('mu0','extension_degree','queries')} for k,v in expected.items()}
     means = read_csv(root / 'final-results.csv')
     raw = read_csv(root / 'final-results.raw.csv')
     assert len(means) == len(expected) == 144
@@ -114,11 +137,14 @@ def main():
     for name in ('manifest.json', 'reused-source-manifest.json', 'reuse-validation.json',
                  'actual-attempt-policy.json', 'final-finished.json', 'policy-directive.json'):
         shutil.copy2(root / name, out / name)
-    parameter_dir = out / 'parameters'
-    parameter_dir.mkdir(exist_ok=True)
+    destination_parameters = out / 'parameters'
+    destination_parameters.mkdir(exist_ok=True)
     for name in ('goldilocks-parameters.csv', 'm127-parameters.csv', 'SHA256SUMS'):
-        shutil.copy2(args.repo / 'data' / name, parameter_dir / name)
-    shutil.copy2(pathlib.Path(__file__), out / 'analyze_hyperfold.py')
+        destination = destination_parameters / name
+        if (parameter_dir / name).resolve() != destination.resolve():
+            shutil.copy2(parameter_dir / name, destination)
+    if pathlib.Path(__file__).resolve() != (out / 'analyze_hyperfold.py').resolve():
+        shutil.copy2(pathlib.Path(__file__), out / 'analyze_hyperfold.py')
     indexed = {key(r): r for r in enriched}
     paired = []
     for q in enriched:

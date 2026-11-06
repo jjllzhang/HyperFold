@@ -16,6 +16,18 @@ Parameters use the 144 official uniform-profile rows, Goldilocks cubic and M127 
 
 This is one machine and one Setup seed, with three repetitions, no CPU pinning and shared host/NUMA scheduling. Encoder contracts differ: Goldilocks RS uses coefficient FFT encoding; M127 RS uses systematic Lagrange encoding. Compare QA/RS at matched field, μ, r and c.
 
+### Regenerate tables and figures from the evidence archive
+
+Requires Python 3.11+ and Matplotlib (generated here with 3.10.6). Download this
+report folder, then run the following commands there. The versioned parameter
+CSVs are checked by SHA-256; an executable is optional for data analysis.
+
+```sh
+mkdir evidence
+tar -xzf raw-evidence.tar.gz -C evidence
+python3 analyze_hyperfold.py --root evidence --parameter-dir parameters --output regenerated
+```
+
 ## Figures
 
 ![commit](commit.png)

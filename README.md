@@ -26,6 +26,14 @@ proof of this implementation, its Fiat–Shamir compilation, or a deployment.
 See [protocol mapping](docs/protocol.md), [test coverage](docs/testing.md), and
 [experiment instructions](docs/experiments.md).
 
+## Retained benchmark results
+
+The final [report, plots and downloadable evidence](experiments/retained-2026-11-06/REPORT.md)
+cover 144 configurations: 142 measured cases (426 repetitions) and two actual
+memory-guard stops with blank measurements. All official runs retained their
+intermediate trees. The report includes archive-only analysis commands, raw samples,
+parameter provenance, peak RSS and file checksums.
+
 ## Build and test
 
 Tested with Rust/Cargo **1.95.0**, edition 2024. The plan's local reference is pinned
