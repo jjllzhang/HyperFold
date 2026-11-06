@@ -1,7 +1,7 @@
 //! Interleaved quadratic sumcheck, natural message ordering and block stride.
 use p3_field::{Algebra, Field};
 use rayon::prelude::*;
-/// Boolean equality weights. Bit i corresponds to coordinate z[i].
+/// Boolean equality weights. Bit i corresponds to coordinate `z[i]`.
 pub fn eq_table<E: Field>(z: &[E]) -> Vec<E> {
     let mut table = vec![E::ZERO; 1 << z.len()];
     table[0] = E::ONE;

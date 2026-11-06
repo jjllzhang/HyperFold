@@ -2,7 +2,7 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{BaseCodeKind, HyperFoldConfig},
-    pcs::{HyperFoldPcs, OpenOptions, Proof},
+    pcs::{HyperFoldPcs, Proof},
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
 };
@@ -175,72 +175,93 @@ fn immutable_statement_and_public_parameter_binding() {
 }
 
 #[test]
-fn low_memory_matches_retained_bytes_and_transcript() {
+fn queried_row_pcs_matches_one_four_and_thirty_two_threads() {
+    type F = Mersenne127;
+    type E = M127Quad;
+    let cfg = HyperFoldConfig::testing(F::KIND, BaseCodeKind::Qa, 14, 2, 4, 4, 2).unwrap();
+    let pcs = HyperFoldPcs::<F, E>::setup(cfg, [49; 32]).unwrap();
+    let mut rng = stream(&[95; 32], b"query-row-parallel", 0);
+    let (cm, data) = pcs
+        .commit((0..cfg.k()).map(|_| F::sample(&mut rng)).collect())
+        .unwrap();
+    let z = point::<F, E>(cfg.mu, &mut rng);
+    let y = evaluate(&data.message, &z);
+    let reference = codec::encode(&pcs.open(&cm, &data, &z, y).unwrap().0).unwrap();
+    for threads in [1, 4, 32] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let p = pool.install(|| pcs.open(&cm, &data, &z, y).unwrap().0);
+        assert_eq!(reference, codec::encode(&p).unwrap());
+    }
+}
+
+#[test]
+fn opening_only_owned_witness_matches_reusable_protocol_and_rejects_tampering() {
     fn check<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
-        let mut rng = stream(&[81; 32], b"memory-modes", 0);
+        let mut rng = stream(&[124; 32], b"one-shot-equivalence", 0);
         for r in [2usize, 4, 8] {
-            for depth in [1, 2, 3, 4] {
-                for c in [2, 4] {
-                    for kind in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+            for c in [2, 4] {
+                for depth in [1, 2, 3, 4] {
+                    for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
                         let cfg = HyperFoldConfig::testing(
                             F::KIND,
-                            kind,
+                            backend,
                             2 + depth * r.ilog2() as usize,
                             2,
                             r,
                             c,
-                            <E as BasedVectorSpace<F>>::DIMENSION,
+                            E::DIMENSION,
                         )
                         .unwrap();
-                        let regular = HyperFoldPcs::<F, E>::setup(cfg, [41; 32]).unwrap();
-                        let mut low =
-                            HyperFoldPcs::<F, E>::setup_low_memory(cfg, [41; 32]).unwrap();
-                        assert_eq!(regular.id, low.id);
-                        let msg: Vec<F> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
-                        let (cm, data) = regular.commit(msg.clone()).unwrap();
-                        let (cm_low, data_low) = low.commit(msg).unwrap();
-                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm_low).unwrap());
-                        assert!(low.open(&cm_low, &data_low, &[], E::ZERO).is_err());
-                        low.prepare_open();
-                        assert!(
-                            low.diagonals
-                                .levels
-                                .iter()
-                                .all(|l| l.forward.capacity() == 0)
-                        );
+                        let reusable = HyperFoldPcs::<F, E>::setup(cfg, [125; 32]).unwrap();
+                        let message: Vec<_> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
+                        let (cm, data) = reusable.commit(message.clone()).unwrap();
                         for _ in 0..2 {
                             let z = point::<F, E>(cfg.mu, &mut rng);
-                            let y = evaluate(&data.message, &z);
-                            let (p, mut t) = regular.open(&cm, &data, &z, y).unwrap();
-                            let (q, mut u) = low
-                                .open_with_options(
-                                    &cm_low,
-                                    &data_low,
-                                    &z,
-                                    y,
-                                    OpenOptions {
-                                        recompute_first_tree: true,
-                                    },
-                                )
+                            let y = evaluate(&message, &z);
+                            // The original borrowed API remains repeatable at multiple points.
+                            let (reference, mut t) = reusable.open(&cm, &data, &z, y).unwrap();
+                            let expected = codec::encode(&reference).unwrap();
+                            let challenge = t.sample::<F, E>(b"one-shot-agreement");
+                            let pcs = HyperFoldPcs::<F, E>::setup(cfg, [125; 32]).unwrap();
+                            let (other_cm, owned) = pcs.commit(message.clone()).unwrap();
+                            assert_eq!(
+                                codec::encode(&cm).unwrap(),
+                                codec::encode(&other_cm).unwrap()
+                            );
+                            let (oracle, witness) = owned.into_parts();
+                            let only = pcs.into_opening_only().unwrap();
+                            let (proof, mut u, timings) = only
+                                .open_once_profiled(&other_cm, &oracle, witness, &z, y)
                                 .unwrap();
-                            assert_eq!(codec::encode(&p).unwrap(), codec::encode(&q).unwrap());
-                            let mut v = low.verify(&cm_low, &z, y, &q).unwrap();
-                            let a = t.sample::<F, E>(b"memory-agreement");
-                            assert_eq!(a, u.sample::<F, E>(b"memory-agreement"));
-                            assert_eq!(a, v.sample::<F, E>(b"memory-agreement"));
+                            assert_eq!(expected, codec::encode(&proof).unwrap());
+                            assert_eq!(timings.released_witness_elements, cfg.k());
+                            assert!(timings.released_witness_capacity >= cfg.k());
+                            assert_eq!(timings.witness_release_round, Some((depth, 0)));
+                            if depth == 1 {
+                                assert!(timings.first_tree_query.is_zero());
+                            }
+                            assert_eq!(challenge, u.sample::<F, E>(b"one-shot-agreement"));
+                            let mut v = only.verify(&other_cm, &z, y, &proof).unwrap();
+                            assert_eq!(challenge, v.sample::<F, E>(b"one-shot-agreement"));
+                            let mut bad = proof.clone();
+                            bad.top.rows[0][0] += F::ONE;
+                            assert!(only.verify(&other_cm, &z, y, &bad).is_err());
+                            let mut bad = proof.clone();
+                            bad.final_table[0] += E::ONE;
+                            assert!(only.verify(&other_cm, &z, y, &bad).is_err());
+                            if let Some(opening) = proof.inner.first()
+                                && !opening.paths.sibling_hashes.is_empty()
+                            {
+                                let mut bad = proof.clone();
+                                bad.inner[0].paths.sibling_hashes[0][0] ^= 1;
+                                assert!(only.verify(&other_cm, &z, y, &bad).is_err());
+                            }
+                            // Oracle still belongs to caller and survives verification/encoding.
+                            std::hint::black_box(&oracle);
                         }
-                        low.prepare_commit();
-                        assert!(
-                            low.diagonals
-                                .levels
-                                .iter()
-                                .all(|l| l.inverse.capacity() == 0)
-                        );
-                        for (a, b) in regular.diagonals.levels.iter().zip(&low.diagonals.levels) {
-                            assert_eq!(a.forward, b.forward);
-                        }
-                        let (cm2, _) = low.commit(data_low.message).unwrap();
-                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm2).unwrap());
                     }
                 }
             }
@@ -248,4 +269,53 @@ fn low_memory_matches_retained_bytes_and_transcript() {
     }
     check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
     check::<Mersenne127, M127Quad>();
+}
+
+#[test]
+fn opening_only_rejects_wrong_binding_and_claim_and_matches_threads() {
+    type F = Mersenne127;
+    type E = M127Quad;
+    let cfg = HyperFoldConfig::testing(F::KIND, BaseCodeKind::Rs, 12, 2, 4, 4, 2).unwrap();
+    let reusable = HyperFoldPcs::<F, E>::setup(cfg, [126; 32]).unwrap();
+    let mut rng = stream(&[127; 32], b"one-shot-errors", 0);
+    let message: Vec<_> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
+    let (cm, data) = reusable.commit(message.clone()).unwrap();
+    let z = point::<F, E>(cfg.mu, &mut rng);
+    let y = evaluate(&message, &z);
+    let reference = codec::encode(&reusable.open(&cm, &data, &z, y).unwrap().0).unwrap();
+    for threads in [1, 4, 32] {
+        let pcs = HyperFoldPcs::<F, E>::setup(cfg, [126; 32]).unwrap();
+        let (other_cm, owned) = pcs.commit(message.clone()).unwrap();
+        let (oracle, witness) = owned.into_parts();
+        let only = pcs.into_opening_only().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let proof = pool.install(|| {
+            only.open_once(&other_cm, &oracle, witness, &z, y)
+                .unwrap()
+                .0
+        });
+        assert_eq!(reference, codec::encode(&proof).unwrap());
+        only.verify(&other_cm, &z, y, &proof).unwrap();
+    }
+    let pcs = HyperFoldPcs::<F, E>::setup(cfg, [126; 32]).unwrap();
+    let (_, data) = pcs.commit(message.clone()).unwrap();
+    let (oracle, witness) = data.into_parts();
+    let only = pcs.into_opening_only().unwrap();
+    assert!(
+        only.open_once(&cm, &oracle, witness, &z, y + E::ONE)
+            .is_err()
+    );
+    let (_, data) = reusable.commit(message.clone()).unwrap();
+    let (_, witness) = data.into_parts();
+    let mut bad_cm = cm.clone();
+    bad_cm.parameters_id[0] ^= 1;
+    assert!(only.open_once(&bad_cm, &oracle, witness, &z, y).is_err());
+    let (_, different) = reusable
+        .commit((0..cfg.k()).map(|_| F::sample(&mut rng)).collect())
+        .unwrap();
+    let (_, wrong_witness) = different.into_parts();
+    assert!(only.open_once(&cm, &oracle, wrong_witness, &z, y).is_err());
 }
