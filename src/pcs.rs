@@ -135,21 +135,6 @@ pub struct Proof<F, E> {
     pub top: Opening<F>,
     pub inner: Vec<CompressedOpening<E>>,
 }
-/// Explicit time/memory tradeoff. Rebuilding is included in open time.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct OpenOptions {
-    pub recompute_first_tree: bool,
-}
-/// Mutually exclusive first-intermediate-tree storage strategies. The default
-/// public opening API retains the original native tree.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FirstTreeStrategy {
-    #[default]
-    NativeRetained,
-    Rebuild,
-    PrehashedRetained,
-    PrehashedRecovered,
-}
 /// Optional coarse profiling of first-tree query extraction and owned-witness
 /// release. All measured work remains inside opening time.
 #[derive(Clone, Copy, Debug, Default)]
@@ -227,14 +212,8 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> OpeningOnlyPcs<F,
         z: &[E],
         y: E,
     ) -> Result<(Proof<F, E>, Transcript)> {
-        self.inner.open_internal(
-            cm,
-            ProverInput::owned(oracle, witness)?,
-            z,
-            y,
-            FirstTreeStrategy::PrehashedRecovered,
-            None,
-        )
+        self.inner
+            .open_internal(cm, ProverInput::owned(oracle, witness)?, z, y, None)
     }
     pub fn open_once_profiled(
         &self,
@@ -250,7 +229,6 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> OpeningOnlyPcs<F,
             ProverInput::owned(oracle, witness)?,
             z,
             y,
-            FirstTreeStrategy::PrehashedRecovered,
             Some(&mut timings),
         )?;
         Ok((proof, transcript, timings))
@@ -266,14 +244,9 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> OpeningOnlyPcs<F,
     }
 }
 impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E> {
+    /// Standard Setup constructs both directions once. Convert to opening-only
+    /// after the final commitment to release forward allocations without inversion.
     pub fn setup(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
-        Self::setup_mode(config, seed, false)
-    }
-    /// Store one diagonal direction; call prepare_open() after commit().
-    pub fn setup_low_memory(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
-        Self::setup_mode(config, seed, true)
-    }
-    fn setup_mode(config: HyperFoldConfig, seed: [u8; 32], single: bool) -> Result<Self> {
         config.validate()?;
         if config.base_field != F::KIND
             || config.extension_degree != <E as BasedVectorSpace<F>>::DIMENSION
@@ -288,11 +261,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let id = *hasher.finalize().as_bytes();
         let base = BaseCodeImpl::new(config, &seed)?;
         let h = LocalMatrix::new(config.r);
-        let diagonals = if single {
-            DiagonalTables::new_single(config, &seed)
-        } else {
-            DiagonalTables::new(config, &seed)
-        };
+        let diagonals = DiagonalTables::new(config, &seed);
         Ok(Self {
             config,
             id,
@@ -315,14 +284,6 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         }
         Ok(OpeningOnlyPcs { inner: self })
     }
-    /// Setup conversion only; benchmark separately from commit/open.
-    pub fn prepare_commit(&mut self) {
-        self.diagonals.prepare_commit();
-    }
-    /// Setup conversion only; benchmark separately from commit/open.
-    pub fn prepare_open(&mut self) {
-        self.diagonals.prepare_open();
-    }
     fn commit_prefix(&self, root: Digest) -> (Transcript, Vec<E>) {
         let mut t = Transcript::new(&self.id);
         t.observe(b"top-root", &root);
@@ -344,7 +305,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
     }
     pub fn commit(&self, message: Vec<F>) -> Result<(Commitment<E>, CommitData<F>)> {
         if !self.diagonals.has_forward() {
-            return Err(Error::Config("call prepare_commit for forward diagonals"));
+            return Err(Error::Config("forward diagonals unavailable"));
         }
         if message.len() != self.config.k() {
             return Err(Error::Config("message length"));
@@ -373,6 +334,8 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             },
         ))
     }
+    /// Reusable borrowed witness API. Uses the same queried-row recovery as
+    /// one-shot opening; the caller retains its original witness and Setup.
     pub fn open(
         &self,
         cm: &Commitment<E>,
@@ -380,53 +343,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         z: &[E],
         y: E,
     ) -> Result<(Proof<F, E>, Transcript)> {
-        self.open_with_options(cm, data, z, y, OpenOptions::default())
-    }
-    pub fn open_with_options(
-        &self,
-        cm: &Commitment<E>,
-        data: &CommitData<F>,
-        z: &[E],
-        y: E,
-        options: OpenOptions,
-    ) -> Result<(Proof<F, E>, Transcript)> {
-        let strategy = if options.recompute_first_tree {
-            FirstTreeStrategy::Rebuild
-        } else {
-            FirstTreeStrategy::NativeRetained
-        };
-        self.open_internal(cm, ProverInput::borrowed(data), z, y, strategy, None)
-    }
-    /// Open with a typed storage strategy, without profiling clocks.
-    pub fn open_with_strategy(
-        &self,
-        cm: &Commitment<E>,
-        data: &CommitData<F>,
-        z: &[E],
-        y: E,
-        strategy: FirstTreeStrategy,
-    ) -> Result<(Proof<F, E>, Transcript)> {
-        self.open_internal(cm, ProverInput::borrowed(data), z, y, strategy, None)
-    }
-    /// Diagnostics only: all clocks and extraction work remain inside open time.
-    pub fn open_profiled(
-        &self,
-        cm: &Commitment<E>,
-        data: &CommitData<F>,
-        z: &[E],
-        y: E,
-        strategy: FirstTreeStrategy,
-    ) -> Result<(Proof<F, E>, Transcript, OpenTimings)> {
-        let mut timings = OpenTimings::default();
-        let (proof, transcript) = self.open_internal(
-            cm,
-            ProverInput::borrowed(data),
-            z,
-            y,
-            strategy,
-            Some(&mut timings),
-        )?;
-        Ok((proof, transcript, timings))
+        self.open_internal(cm, ProverInput::borrowed(data), z, y, None)
     }
     fn open_internal(
         &self,
@@ -434,7 +351,6 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         input: ProverInput<'_, F>,
         z: &[E],
         y: E,
-        strategy: FirstTreeStrategy,
         mut timings: Option<&mut OpenTimings>,
     ) -> Result<(Proof<F, E>, Transcript)> {
         let ProverInput {
@@ -443,7 +359,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             mut witness,
         } = input;
         if !self.diagonals.has_inverse() {
-            return Err(Error::Config("call prepare_open for inverse diagonals"));
+            return Err(Error::Config("inverse diagonals unavailable"));
         }
         if cm.root != prover_root || witness.values().len() != self.config.k() {
             return Err(Error::Proof("prover data mismatch"));
@@ -453,11 +369,10 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         let d = config.depth();
         let mut weights = sumcheck::combined_weights(&z0, z, gamma);
         let mut f = Vec::<E>::new();
-        let mut trees: Vec<Option<Tree<E>>> = Vec::with_capacity(d - 1);
+        let mut trees: Vec<Tree<E>> = Vec::with_capacity(d.saturating_sub(2));
         let mut rounds = Vec::with_capacity(d);
         let mut roots = Vec::with_capacity(d - 1);
         let mut running = cm.y0 + gamma * y;
-        let mut first_beta = None;
         let mut first_dense = None;
         let mut recovered_tree = None;
         for i in (1..=d).rev() {
@@ -503,32 +418,20 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
             f.shrink_to_fit();
             if i > 1 {
                 let b = beta(&alphas);
-                if i == d {
-                    first_beta = Some(b);
-                }
                 let next = if i == d {
                     let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 } else if let Some(matrix) = first_dense.as_ref() {
                     fold_level(config, &self.h, &self.diagonals, matrix, i, &b)
                 } else {
-                    let matrices = mmcs::mmcs::<E>().get_matrices(
-                        trees
-                            .last()
-                            .and_then(Option::as_ref)
-                            .expect("previous tree"),
-                    );
+                    let matrices =
+                        mmcs::mmcs::<E>().get_matrices(trees.last().expect("previous tree"));
                     fold_level(config, &self.h, &self.diagonals, matrices[0], i, &b)
                 };
                 // The successor matrix is complete; release the sole dense owner
                 // before committing the next tree. No descriptor borrows it.
                 first_dense = None;
-                if strategy == FirstTreeStrategy::Rebuild && trees.len() == 1 {
-                    // Its matrix was needed above; drop it before building the second tree.
-                    trees[0] = None;
-                }
-                let first = trees.is_empty();
-                let (root, tree) = if first && strategy == FirstTreeStrategy::PrehashedRecovered {
+                let root = if i == d {
                     let digests = mmcs::hash_leaves(&next);
                     let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
                     let matrix = RecoveredFirstMatrix::new(
@@ -542,19 +445,15 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                     recovered_tree = Some(lazy);
                     if d >= 3 {
                         first_dense = Some(next);
-                    } // d=2: release now.
-                    (root, None)
-                } else if first && strategy == FirstTreeStrategy::PrehashedRetained {
-                    let digests = mmcs::hash_leaves(&next);
-                    let (root, tree) = mmcs::commit_prehashed(next, digests);
-                    (root, Some(tree))
+                    }
+                    root
                 } else {
                     let (root, tree) = mmcs::commit(next);
-                    (root, Some(tree))
+                    trees.push(tree);
+                    root
                 };
                 t.observe(b"folded-root", &root);
                 roots.push(root);
-                trees.push(tree);
             } else {
                 t.observe(b"final-table", &f);
             }
@@ -584,42 +483,12 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 paths: o.paths,
             }
         };
-        let mut rebuild = false;
-        // Consume retained trees first. Rebuilding earlier would recreate the original
-        // peak while all smaller trees were still live.
-        for (pos, tree) in trees.into_iter().enumerate() {
-            if let Some(tree) = tree {
-                let start = (pos == 0 && timings.is_some()).then(Instant::now);
-                let indices = project(&queries, config.n(d - 2 - pos));
-                inner[pos] = Some(compress_opening(pos, &indices, mmcs::open(&tree, &indices)));
-                if let Some(start) = start {
-                    timings.as_mut().unwrap().first_tree_query = start.elapsed();
-                }
-            } else {
-                assert_eq!(pos, 0);
-                rebuild = recovered_tree.is_none();
-            }
-        }
-        if rebuild {
-            let matrices = mmcs::mmcs::<F>().get_matrices(top_tree);
-            let next = fold_level(
-                config,
-                &self.h,
-                &self.diagonals,
-                matrices[0],
-                d,
-                &first_beta.expect("first folding challenges"),
-            );
-            let (root, tree) = mmcs::commit(next);
-            if root != roots[0] {
-                return Err(Error::Proof("reconstructed tree root"));
-            }
-            let start = timings.is_some().then(Instant::now);
-            let indices = project(&queries, config.n(d - 2));
-            inner[0] = Some(compress_opening(0, &indices, mmcs::open(&tree, &indices)));
-            if let Some(start) = start {
-                timings.as_mut().unwrap().first_tree_query = start.elapsed();
-            }
+        // Open and release smaller retained trees before recovering the first
+        // tree's queried rows, preserving the established query/cleanup order.
+        for (index, tree) in trees.into_iter().enumerate() {
+            let pos = index + 1;
+            let indices = project(&queries, config.n(d - 2 - pos));
+            inner[pos] = Some(compress_opening(pos, &indices, mmcs::open(&tree, &indices)));
         }
         if let Some(tree) = recovered_tree {
             let start = timings.is_some().then(Instant::now);
@@ -652,7 +521,7 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         proof: &Proof<F, E>,
     ) -> Result<Transcript> {
         if !self.diagonals.has_inverse() {
-            return Err(Error::Config("call prepare_open for inverse diagonals"));
+            return Err(Error::Config("inverse diagonals unavailable"));
         }
         let config = self.config;
         let d = config.depth();
@@ -840,8 +709,9 @@ mod lifecycle_tests {
         }
         assert!(only.inner.diagonals.has_inverse());
         assert!(!only.inner.diagonals.has_forward());
-        let low = HyperFoldPcs::<F, E>::setup_low_memory(cfg, [123; 32]).unwrap();
-        assert!(low.into_opening_only().is_err());
+        let mut incomplete = HyperFoldPcs::<F, E>::setup(cfg, [123; 32]).unwrap();
+        incomplete.diagonals.levels[0].inverse.clear();
+        assert!(incomplete.into_opening_only().is_err());
     }
     #[test]
     fn owning_witness_release_deallocates_and_error_paths_drop_owned_values() {

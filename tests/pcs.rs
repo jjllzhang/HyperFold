@@ -2,7 +2,7 @@ use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
     params::{BaseCodeKind, HyperFoldConfig},
-    pcs::{FirstTreeStrategy, HyperFoldPcs, OpenOptions, Proof},
+    pcs::{HyperFoldPcs, Proof},
     sampling::{SampleBase, stream},
     sumcheck::evaluate,
 };
@@ -175,145 +175,6 @@ fn immutable_statement_and_public_parameter_binding() {
 }
 
 #[test]
-fn low_memory_matches_retained_bytes_and_transcript() {
-    fn check<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
-        let mut rng = stream(&[81; 32], b"memory-modes", 0);
-        for r in [2usize, 4, 8] {
-            for depth in [1, 2, 3, 4] {
-                for c in [2, 4] {
-                    for kind in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
-                        let cfg = HyperFoldConfig::testing(
-                            F::KIND,
-                            kind,
-                            2 + depth * r.ilog2() as usize,
-                            2,
-                            r,
-                            c,
-                            <E as BasedVectorSpace<F>>::DIMENSION,
-                        )
-                        .unwrap();
-                        let regular = HyperFoldPcs::<F, E>::setup(cfg, [41; 32]).unwrap();
-                        let mut low =
-                            HyperFoldPcs::<F, E>::setup_low_memory(cfg, [41; 32]).unwrap();
-                        assert_eq!(regular.id, low.id);
-                        let msg: Vec<F> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
-                        let (cm, data) = regular.commit(msg.clone()).unwrap();
-                        let (cm_low, data_low) = low.commit(msg).unwrap();
-                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm_low).unwrap());
-                        assert!(low.open(&cm_low, &data_low, &[], E::ZERO).is_err());
-                        low.prepare_open();
-                        assert!(
-                            low.diagonals
-                                .levels
-                                .iter()
-                                .all(|l| l.forward.capacity() == 0)
-                        );
-                        for _ in 0..2 {
-                            let z = point::<F, E>(cfg.mu, &mut rng);
-                            let y = evaluate(&data.message, &z);
-                            let (p, mut t) = regular.open(&cm, &data, &z, y).unwrap();
-                            let (q, mut u) = low
-                                .open_with_options(
-                                    &cm_low,
-                                    &data_low,
-                                    &z,
-                                    y,
-                                    OpenOptions {
-                                        recompute_first_tree: true,
-                                    },
-                                )
-                                .unwrap();
-                            assert_eq!(codec::encode(&p).unwrap(), codec::encode(&q).unwrap());
-                            let mut v = low.verify(&cm_low, &z, y, &q).unwrap();
-                            let a = t.sample::<F, E>(b"memory-agreement");
-                            assert_eq!(a, u.sample::<F, E>(b"memory-agreement"));
-                            assert_eq!(a, v.sample::<F, E>(b"memory-agreement"));
-                        }
-                        low.prepare_commit();
-                        assert!(
-                            low.diagonals
-                                .levels
-                                .iter()
-                                .all(|l| l.inverse.capacity() == 0)
-                        );
-                        for (a, b) in regular.diagonals.levels.iter().zip(&low.diagonals.levels) {
-                            assert_eq!(a.forward, b.forward);
-                        }
-                        let (cm2, _) = low.commit(data_low.message).unwrap();
-                        assert_eq!(codec::encode(&cm).unwrap(), codec::encode(&cm2).unwrap());
-                    }
-                }
-            }
-        }
-    }
-    check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
-    check::<Mersenne127, M127Quad>();
-}
-
-#[test]
-fn queried_row_strategies_match_native_bytes_transcript_and_tampering() {
-    fn check<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
-        let mut rng = stream(&[94; 32], b"query-row-pcs", 0);
-        for r in [2usize, 4, 8] {
-            for c in [2, 4] {
-                for depth in [1, 2, 3, 4] {
-                    for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
-                        let cfg = HyperFoldConfig::testing(
-                            F::KIND,
-                            backend,
-                            2 + depth * r.ilog2() as usize,
-                            2,
-                            r,
-                            c,
-                            E::DIMENSION,
-                        )
-                        .unwrap();
-                        let pcs = HyperFoldPcs::<F, E>::setup(cfg, [48; 32]).unwrap();
-                        let msg = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
-                        let (cm, data) = pcs.commit(msg).unwrap();
-                        for _ in 0..2 {
-                            let z = point::<F, E>(cfg.mu, &mut rng);
-                            let y = evaluate(&data.message, &z);
-                            let (native, mut t) = pcs.open(&cm, &data, &z, y).unwrap();
-                            let expected = codec::encode(&native).unwrap();
-                            let challenge = t.sample::<F, E>(b"query-row-agreement");
-                            for strategy in [
-                                FirstTreeStrategy::NativeRetained,
-                                FirstTreeStrategy::PrehashedRetained,
-                                FirstTreeStrategy::PrehashedRecovered,
-                            ] {
-                                let (proof, mut u, times) =
-                                    pcs.open_profiled(&cm, &data, &z, y, strategy).unwrap();
-                                assert_eq!(expected, codec::encode(&proof).unwrap());
-                                assert_eq!(challenge, u.sample::<F, E>(b"query-row-agreement"));
-                                let mut v = pcs.verify(&cm, &z, y, &proof).unwrap();
-                                assert_eq!(challenge, v.sample::<F, E>(b"query-row-agreement"));
-                                if depth == 1 {
-                                    assert!(times.first_tree_query.is_zero());
-                                } else {
-                                    let mut bad = proof.clone();
-                                    bad.inner[0].rows[0][0] += E::ONE;
-                                    assert!(pcs.verify(&cm, &z, y, &bad).is_err());
-                                    let mut bad = proof.clone();
-                                    if let Some(sibling) =
-                                        bad.inner[0].paths.sibling_hashes.first_mut()
-                                    {
-                                        sibling[0] ^= 1;
-                                        assert!(pcs.verify(&cm, &z, y, &bad).is_err());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
-    check::<Mersenne127, M127Quad>();
-}
-
-#[test]
 fn queried_row_pcs_matches_one_four_and_thirty_two_threads() {
     type F = Mersenne127;
     type E = M127Quad;
@@ -331,17 +192,8 @@ fn queried_row_pcs_matches_one_four_and_thirty_two_threads() {
             .num_threads(threads)
             .build()
             .unwrap();
-        for strategy in [
-            FirstTreeStrategy::PrehashedRetained,
-            FirstTreeStrategy::PrehashedRecovered,
-        ] {
-            let p = pool.install(|| {
-                pcs.open_with_strategy(&cm, &data, &z, y, strategy)
-                    .unwrap()
-                    .0
-            });
-            assert_eq!(reference, codec::encode(&p).unwrap());
-        }
+        let p = pool.install(|| pcs.open(&cm, &data, &z, y).unwrap().0);
+        assert_eq!(reference, codec::encode(&p).unwrap());
     }
 }
 
@@ -370,15 +222,7 @@ fn opening_only_owned_witness_matches_reusable_protocol_and_rejects_tampering() 
                             let z = point::<F, E>(cfg.mu, &mut rng);
                             let y = evaluate(&message, &z);
                             // The original borrowed API remains repeatable at multiple points.
-                            let (reference, mut t) = reusable
-                                .open_with_strategy(
-                                    &cm,
-                                    &data,
-                                    &z,
-                                    y,
-                                    FirstTreeStrategy::PrehashedRecovered,
-                                )
-                                .unwrap();
+                            let (reference, mut t) = reusable.open(&cm, &data, &z, y).unwrap();
                             let expected = codec::encode(&reference).unwrap();
                             let challenge = t.sample::<F, E>(b"one-shot-agreement");
                             let pcs = HyperFoldPcs::<F, E>::setup(cfg, [125; 32]).unwrap();
@@ -396,6 +240,9 @@ fn opening_only_owned_witness_matches_reusable_protocol_and_rejects_tampering() 
                             assert_eq!(timings.released_witness_elements, cfg.k());
                             assert!(timings.released_witness_capacity >= cfg.k());
                             assert_eq!(timings.witness_release_round, Some((depth, 0)));
+                            if depth == 1 {
+                                assert!(timings.first_tree_query.is_zero());
+                            }
                             assert_eq!(challenge, u.sample::<F, E>(b"one-shot-agreement"));
                             let mut v = only.verify(&other_cm, &z, y, &proof).unwrap();
                             assert_eq!(challenge, v.sample::<F, E>(b"one-shot-agreement"));

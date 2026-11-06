@@ -88,17 +88,23 @@ allocations, then release excess capacity at level boundaries. Intermediate enco
 butterflies update disjoint lanes in place; only the final bundle layout uses a
 second output buffer.
 
-Default Setup retains both diagonal directions; default open retains all intermediate
-trees. Explicit `setup_low_memory` retains one direction. `prepare_commit` and
-`prepare_open` invert the same allocation in bounded parallel chunks; missing-direction
-calls return a configuration error. Parameter IDs, transcript and wire proof are
-identical in both modes. Conversion is separately timed in the CLI.
+Setup computes forward and inverse diagonals once. After the last commitment,
+`into_opening_only` releases the forward allocations without resampling or inversion.
+`open_once` consumes the witness after its first complete lifted subround; its
+caller-owned top oracle stays alive through verification and serialization.
+The reusable borrowed `open` API retains the caller's witness and parameters.
 
-`open_with_options(recompute_first_tree=true)` drops the first intermediate tree
-once its successor matrix exists. After queries are drawn, it opens and drops all
-retained smaller trees before reconstructing the first tree from the top matrix and
-saved first folding challenges. Reconstruction, hashing and path opening are inside
-open time. This is a specific time/memory tradeoff, not constant-memory streaming.
-The resource model uses Plonky3's full retained digest payload, all live matrices,
-diagonals, messages, weights and transient shrink/fold buffers, plus explicit
-headroom. Actual RSS must still be measured.
+Every opening uses the same first-intermediate-tree strategy: prehash the dense
+codeword, commit a queried-row descriptor with the pinned public Plonky3 API,
+retain the dense owner only until its successor matrix has finished folding,
+then release it before committing that successor. At depth two the dense owner
+is dropped immediately after its own commitment; depth one has no intermediate
+tree. Hash layers remain until query opening. Only queried rows are recovered
+from the retained top codeword, inverse diagonals and first folding challenges.
+Smaller retained trees are opened/released before the first recovered tree.
+Native multiproofs, transcript order, compressed-row order and wire bytes remain
+unchanged. There is no whole-tree reconstruction or diagonal direction toggle.
+
+See [memory/API migration](memory-migration.md) for the removed experimental
+selectors and their fixed historical source. The formal CLI/Criterion always use
+the owning lifecycle; pure mathematical/MMCS references stay in tests.

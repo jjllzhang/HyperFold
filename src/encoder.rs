@@ -1,5 +1,5 @@
 //! Message blocks are natural-order contiguous subtrees. Public codeword matrices
-//! use rows (pi[j], pi[j+n_prev], ...) and never confuse physical/logical indices.
+//! use rows (`pi[j]`, `pi[j+n_prev]`, ...) and never confuse physical/logical indices.
 use crate::{
     base_code::{BaseCode, BaseCodeImpl},
     matrix_h::LocalMatrix,
