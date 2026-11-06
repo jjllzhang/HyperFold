@@ -157,6 +157,21 @@ def main():
     report += (f"M127 μ={manifest['mu']}, r=2, c=4, quadratic extension, QA/RS, 32 Rayon threads. "
                'A = original native retention; B = prehashed retention; C = prehashed queried-row recovery. '
                'B/C share one leaf-hashing function and the same pinned native tree constructor.\n\n')
+    if not args.allow_smoke:
+        primary = {r['backend']: r for r in comparisons if r['baseline'] == 'native' and r['compared'] == 'recovered'}
+        qa, rs = primary['qa'], primary['rs']
+        report += (f"Relative to native retention, mean open changed by {float(qa['delta_ms']):+.3f} ms "
+                   f"({float(qa['change_percent']):+.3f}%) for QA and {float(rs['delta_ms']):+.3f} ms "
+                   f"({float(rs['change_percent']):+.3f}%) for RS. "
+                   f"The sample SDs of the three round differences were {float(qa['round_delta_sd_ms']):.3f} / "
+                   f"{float(rs['round_delta_sd_ms']):.3f} ms. "
+                   "See the process-level ranges below; these are descriptive measurements, not a bound on future runs. ")
+        if all(float(r['min_round_percent']) <= 0 <= float(r['max_round_percent']) for r in primary.values()):
+            report += ("Both round-difference ranges cross zero: this experiment did not resolve a stable increase; "
+                       "it does not establish zero overhead. ")
+        peaks = {(r['backend'], r['strategy']): float(r['max_process_rss_gib']) for r in aggregate}
+        report += (f"Maximum process RSS changed from {peaks['qa','native']:.3f} / {peaks['rs','native']:.3f} GiB "
+                   f"to {peaks['qa','recovered']:.3f} / {peaks['rs','recovered']:.3f} GiB for QA/RS.\n\n")
     report += '| Code | Strategy | Open mean (s) | SD across process means (s) | First-tree query (ms) | Max process RSS (GiB) |\n|---|---|---:|---:|---:|---:|\n'
     for r in aggregate:
         sd = f"{float(r['process_mean_sd_ms'])/1000:.4f}" if r['process_mean_sd_ms'] else 'n/a'

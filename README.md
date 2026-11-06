@@ -35,6 +35,13 @@ all incomplete timing and proof-size measurements are blank. Real memory traces,
 exit records, global OOM-counter observations and portable analysis are included.
 No recomputation was used, and the 142 previously measured cases are unchanged.
 
+The [queried-row recovery comparison](experiments/query-rows-2026-11-06/REPORT.md)
+completed 18 processes / 54 measured openings at M127 μ=26, r=2, c=4. Relative to
+native retention, QA/RS mean open changed by +0.422% / +0.054%, with both round
+ranges crossing zero; this study did not resolve a stable increase. Peak process
+RSS fell from about 36.98 / 36.99 GiB to 32.98 / 32.99 GiB. The report includes a
+prehashed-retention constructor control and does not extrapolate to μ=30.
+
 The separate [first-tree rebuilding comparison](experiments/recompute-overhead-2026-11-06/REPORT.md)
 measures a 31.453%–38.822% opening-time increase at four fitting M127 settings
 (μ=24/26, r=2, c=4). Both Setup table directions stay live in this comparison;

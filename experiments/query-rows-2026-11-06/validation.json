@@ -1,0 +1,10 @@
+{
+  "processes": 18,
+  "raw_samples": 54,
+  "all_exit_codes": 0,
+  "parameter_queries_and_extension_checked": true,
+  "all_strategy_fingerprints_and_sizes_match": true,
+  "raw_means_and_sample_sd_and_rss_recomputed": true,
+  "binary_sha256_verified": true,
+  "portable_archive_only_five_csvs_byte_identical": true
+}

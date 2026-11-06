@@ -237,3 +237,7 @@ A/B query the first tree before the remaining intermediate trees, while C querie
 it after they are opened and released. The first-tree sub-timing therefore also
 reflects query ordering and cache state. Use total open for the net strategy
 comparison; the sub-timing is not an isolated row-fold arithmetic measurement.
+
+The completed [18-process / 54-sample report](../experiments/query-rows-2026-11-06/REPORT.md)
+contains every process mean and within-/across-process variation, constructor
+contrasts, RSS, raw archive and an archive-only numeric analysis helper.
