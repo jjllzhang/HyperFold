@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "memory_mode": "retained",
+  "directive_message": "f6c7710b-90a3-4872-a085-470c0c84d37b",
+  "source": "Jal1n in #code-and-bench:f4722c03",
+  "scope": [
+    "M127-Qa-30-2-4",
+    "M127-Rs-30-2-4"
+  ],
+  "estimate_ceiling_bypassed": true,
+  "live_available_memory_guard_gib": 12,
+  "expiry": "after these two actual attempts complete, or on explicit policy revocation",
+  "source_commit": "5f09f90"
+}

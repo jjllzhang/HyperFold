@@ -1,0 +1,12 @@
+{
+  "directive_message": "81c5aca0-31d3-4690-8784-4beddbc09c5c",
+  "owner": "Jal1n",
+  "memory_mode": "retained",
+  "recomputation_permitted": false,
+  "memory_exclusion_cases": [
+    "M127-Qa-30-2-4",
+    "M127-Rs-30-2-4"
+  ],
+  "prior_partial_case": "Goldilocks-Qa-30-8-2 interrupted and rerun",
+  "binary_unchanged": true
+}
