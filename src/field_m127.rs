@@ -189,11 +189,6 @@ impl PrimeField for Mersenne127 {
     }
 }
 impl ExtensionAlgebra<Self, 2, Binomial<Self>> for Mersenne127 {
-    #[inline]
-    fn ext_square(a: &[Self; 2], out: &mut [Self; 2]) {
-        out[0] = (a[0] + a[1]) * (a[0] - a[1]);
-        out[1] = (a[0] * a[1]).double();
-    }
     fn ext_mul(a: &[Self; 2], b: &[Self; 2], out: &mut [Self; 2]) {
         let ac = a[0] * b[0];
         let bd = a[1] * b[1];
