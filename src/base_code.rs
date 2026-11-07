@@ -33,6 +33,16 @@ pub trait BaseCode<F: Field>: Send + Sync {
     fn k0(&self) -> usize;
     fn n0(&self) -> usize;
     fn encode_slice<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]);
+    /// Compare every supplied coordinate against the same complete encoded message.
+    /// Invalid shapes/indices fail; duplicate indices are compared independently.
+    fn check_encoded_at<T: Field + Algebra<F>>(&self, msg: &[T], expected: &[(usize, T)]) -> bool {
+        if msg.len() != self.k0() || expected.iter().any(|&(j, _)| j >= self.n0()) {
+            return false;
+        }
+        let mut encoded = vec![T::ZERO; self.n0()];
+        self.encode_slice(msg, &mut encoded);
+        expected.iter().all(|&(j, value)| encoded[j] == value)
+    }
     fn encode_base_slice(&self, msg: &[F], out: &mut [F]) {
         self.encode_slice(msg, out)
     }

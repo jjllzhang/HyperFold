@@ -30,3 +30,11 @@ codegen-units = 1
 [[bench]]
 name = "pcs"
 harness = false
+
+[[bench]]
+name = "m127_kernels"
+harness = false
+
+[[bench]]
+name = "pcs_bytes"
+harness = false
