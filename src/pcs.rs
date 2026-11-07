@@ -576,8 +576,6 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         {
             return Err(Error::Proof("terminal sumcheck"));
         }
-        let mut pi0 = vec![E::ZERO; config.n(0)];
-        self.base.encode_slice(&proof.final_table, &mut pi0);
         let queries = draw_queries(&mut t, config);
         let top_indices = project(&queries, config.n(d - 1));
         merkle_commitment::verify(
@@ -657,10 +655,8 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
                 })
                 .collect();
         }
-        for (j, v) in expected {
-            if pi0[j] != v {
-                return Err(Error::Proof("terminal codeword fold"));
-            }
+        if !self.base.check_encoded_at(&proof.final_table, &expected) {
+            return Err(Error::Proof("terminal codeword fold"));
         }
         Ok(t)
     }
