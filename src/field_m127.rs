@@ -133,19 +133,6 @@ impl PrimeCharacteristicRing for Mersenne127 {
         f
     }
     #[inline]
-    fn square(&self) -> Self {
-        // Three wide products; all intermediates fit u128 for canonical a < p.
-        // This is a separate reduction from Mul: do not remove Mul's Self::new.
-        let a0 = self.0 & u64::MAX as u128;
-        let a1 = self.0 >> 64;
-        let t0 = a0 * a0;
-        let t1 = a0 * (2 * a1) + (t0 >> 64);
-        let u = a1 * (2 * a1) + (t1 >> 63);
-        let v = (t0 & u64::MAX as u128) | ((t1 & ((1u128 << 63) - 1)) << 64);
-        let s = u + v;
-        Self((s & P) + (s >> 127))
-    }
-    #[inline]
     fn halve(&self) -> Self {
         Self((self.0 >> 1) | ((self.0 & 1) << 126))
     }
@@ -256,7 +243,7 @@ mod tests {
         }
     }
     #[test]
-    fn specialized_squares_and_inverse_match_independent_reference() {
+    fn canonical_squares_and_inverse_match_independent_reference() {
         let p = BigUint::from(P);
         let mut seed = 0x123456789abcdefu128;
         let mut inputs = vec![
