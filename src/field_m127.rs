@@ -152,19 +152,7 @@ impl Field for Mersenne127 {
         if self.0 == 0 {
             None
         } else {
-            // x_j = a^(2^j - 1); 126 squarings and 12 multiplies in total.
-            let x2 = self.square() * *self;
-            let x4 = x2.exp_power_of_2(2) * x2;
-            let x8 = x4.exp_power_of_2(4) * x4;
-            let x16 = x8.exp_power_of_2(8) * x8;
-            let x32 = x16.exp_power_of_2(16) * x16;
-            let x64 = x32.exp_power_of_2(32) * x32;
-            let x96 = x64.exp_power_of_2(32) * x32;
-            let x112 = x96.exp_power_of_2(16) * x16;
-            let x120 = x112.exp_power_of_2(8) * x8;
-            let x124 = x120.exp_power_of_2(4) * x4;
-            let x125 = x124.square() * *self;
-            Some(x125.exp_power_of_2(2) * *self)
+            Some(self.pow_u128(P - 2))
         }
     }
     fn order() -> BigUint {
@@ -305,32 +293,6 @@ mod tests {
                 assert_eq!(z.square(), z * z);
             }
         }
-    }
-    #[test]
-    fn inverse_chain_exponents_and_operation_count() {
-        // Mirror each straight-line instruction in try_inverse using integer exponents.
-        let mut squares = 0;
-        let mut multiplies = 0;
-        let mut step = |x: &BigUint, shift: usize, y: &BigUint| {
-            squares += shift;
-            multiplies += 1;
-            (x << shift) + y
-        };
-        let a = BigUint::from(1u8);
-        let x2 = step(&a, 1, &a);
-        let x4 = step(&x2, 2, &x2);
-        let x8 = step(&x4, 4, &x4);
-        let x16 = step(&x8, 8, &x8);
-        let x32 = step(&x16, 16, &x16);
-        let x64 = step(&x32, 32, &x32);
-        let x96 = step(&x64, 32, &x32);
-        let x112 = step(&x96, 16, &x16);
-        let x120 = step(&x112, 8, &x8);
-        let x124 = step(&x120, 4, &x4);
-        let x125 = step(&x124, 1, &a);
-        let exponent = step(&x125, 2, &a);
-        assert_eq!(exponent, BigUint::from(P - 2));
-        assert_eq!((squares, multiplies), (126, 12));
     }
     #[test]
     fn canonical_codec() {
