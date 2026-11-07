@@ -1,6 +1,8 @@
 //! Offline 32-persistent-worker kernels; CSV goes to stdout, never results/.
 //! Run: taskset -c <32 physical CPUs> target/release/deps/m127_kernels-* --windows 5
+//! Each worker window accumulates >=100ms of actual kernel work after calibration.
 //! Worker timing excludes setup/checks; outer wall includes barriers and checks.
+use clap::Parser;
 use hyperfold_pcs::{
     base_code::{BaseCode, BaseCodeImpl},
     field_m127::{M127Quad, Mersenne127, P},
@@ -186,15 +188,31 @@ fn encoding<T: ExtensionField<Mersenne127> + Send + 'static>(
     }
     jobs
 }
+const MIN_WINDOW: Duration = Duration::from_millis(100);
+#[derive(Parser)]
+struct Args {
+    #[arg(long, default_value_t = 5)]
+    windows: usize,
+    /// Exact kernel names, e.g. F_square,E_full_encode. Empty runs every kernel.
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+}
+type WorkerPanic = Box<dyn std::any::Any + Send>;
+fn checked_run(job: &mut Job, count: usize, failure: &mut Option<WorkerPanic>) -> Duration {
+    if failure.is_some() {
+        return Duration::ZERO;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (job.run)(count))) {
+        Ok(elapsed) => elapsed,
+        Err(error) => {
+            *failure = Some(error);
+            Duration::ZERO
+        }
+    }
+}
 fn main() {
-    let args: Vec<_> = std::env::args().collect();
-    let windows = if args.len() == 3 && args[1] == "--windows" {
-        args[2].parse::<usize>().unwrap()
-    } else if args.len() == 1 {
-        5
-    } else {
-        panic!("usage: m127_kernels [--windows N]")
-    };
+    let args = Args::parse();
+    let windows = args.windows;
     assert!(windows >= 5, "at least five measured windows");
     let mut codes = Vec::new();
     for k0 in [64usize, 128, 256] {
@@ -221,9 +239,16 @@ fn main() {
             let mut jobs = arithmetic(w);
             jobs.extend(encoding::<Mersenne127>(w, "F", &codes));
             jobs.extend(encoding::<M127Quad>(w, "E", &codes));
+            jobs.retain(|job| args.only.is_empty() || args.only.contains(&job.name));
             jobs
         })
         .collect();
+    for name in &args.only {
+        assert!(
+            workers[0].iter().any(|job| &job.name == name),
+            "unknown kernel {name}"
+        );
+    }
     let names: Vec<_> = workers[0].iter().map(|j| j.name.clone()).collect();
     let barrier = Arc::new(Barrier::new(33));
     let mut wall = Vec::new();
@@ -237,37 +262,49 @@ fn main() {
                     let mut rows = Vec::new();
                     let mut failure = None;
                     for (index, job) in jobs.iter_mut().enumerate() {
+                        // Calibration is outside all measured windows. The original iteration
+                        // count is a multiple of1024 for arithmetic, preserving its input cycle.
+                        barrier.wait();
+                        let initial = job.iterations;
+                        let calibration = checked_run(job, initial, &mut failure);
+                        barrier.wait();
+                        let multiplier = (MIN_WINDOW.as_nanos() * 3 / 2)
+                            .div_ceil(calibration.as_nanos().max(1))
+                            .clamp(1, 100_000) as usize;
+                        let batch = initial.checked_mul(multiplier).unwrap();
                         for window in 0..=windows {
                             barrier.wait();
-                            let elapsed = if failure.is_none() {
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    (job.run)(job.iterations)
-                                })) {
-                                    Ok(elapsed) => elapsed,
-                                    Err(error) => {
-                                        failure = Some(error);
-                                        Duration::ZERO
-                                    }
-                                }
-                            } else {
-                                Duration::ZERO
-                            };
+                            let mut elapsed = Duration::ZERO;
+                            let mut iterations = 0usize;
+                            let mut batches = 0usize;
+                            // Local repetition, NOT repeated thread-pool task dispatch. Every
+                            // batch black-boxes each input/output inside its timed kernel loop.
+                            while elapsed < MIN_WINDOW && failure.is_none() {
+                                elapsed += checked_run(job, batch, &mut failure);
+                                iterations += batch;
+                                batches += 1;
+                            }
                             barrier.wait();
                             if window > 0 {
                                 rows.push((
                                     index,
                                     format!(
-                                        "{},{},{},{},{},{},{},{},{},{}",
+                                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                                         job.name,
                                         job.k0,
                                         job.c,
                                         worker,
                                         window,
-                                        job.iterations,
+                                        iterations,
                                         elapsed.as_nanos(),
-                                        elapsed.as_secs_f64() * 1e9 / job.iterations as f64,
+                                        elapsed.as_secs_f64() * 1e9 / iterations as f64,
                                         job.systematic,
-                                        job.parity
+                                        job.parity,
+                                        initial,
+                                        calibration.as_nanos(),
+                                        batch,
+                                        batches,
+                                        MIN_WINDOW.as_nanos()
                                     ),
                                 ));
                             }
@@ -281,6 +318,8 @@ fn main() {
             })
             .collect();
         for _ in &names {
+            barrier.wait();
+            barrier.wait(); // untimed calibration
             for window in 0..=windows {
                 let start = Instant::now();
                 barrier.wait();
@@ -296,7 +335,7 @@ fn main() {
             .collect::<Vec<_>>()
     });
     println!(
-        "kernel,k0,c,worker,window,iterations,worker_ns,ns_per_operation,selected_systematic,selected_parity,outer_wall_ns"
+        "kernel,k0,c,worker,window,iterations,worker_ns,ns_per_operation,selected_systematic,selected_parity,calibration_iterations,calibration_ns,batch_iterations,batches,min_window_ns,outer_wall_ns"
     );
     for rows in results {
         for (index, row) in rows {
