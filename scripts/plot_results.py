@@ -195,8 +195,10 @@ def save_figures(tables, output_dir):
             try:
                 pdf = base.with_suffix(".pdf")
                 png = base.with_suffix(".png")
-                fig.savefig(pdf, metadata={"CreationDate": None, "ModDate": None})
-                fig.savefig(png, dpi=300)
+                # Export backends consult rcParams at save time, not figure creation.
+                with plt.rc_context(STYLE):
+                    fig.savefig(pdf, metadata={"CreationDate": None, "ModDate": None})
+                    fig.savefig(png, dpi=300)
                 outputs.extend((pdf, png))
             finally:
                 plt.close(fig)

@@ -212,6 +212,10 @@ class PlotTests(unittest.TestCase):
                 pdf = base.with_suffix(".pdf").read_bytes()
                 self.assertTrue(pdf.startswith(b"%PDF-"))
                 self.assertEqual(len(re.findall(rb"/Type /Page\b", pdf)), 1)
+                # Matplotlib writes these font dictionaries outside compressed streams.
+                self.assertNotRegex(pdf, rb"/Subtype\s*/Type3\b")
+                self.assertRegex(pdf, rb"/Subtype\s*/CIDFontType2\b")
+                self.assertRegex(pdf, rb"/FontFile2\s+\d+\s+0\s+R")
                 image = mpimg.imread(base.with_suffix(".png"))
                 self.assertEqual(image.shape[:2], (2160, 3000))
                 self.assertGreater(image.std(), 0.05)
