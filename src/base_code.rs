@@ -142,8 +142,9 @@ impl<F: Field> BaseCode<F> for BaseCodeImpl<F> {
                     msg[j] == value
                 } else {
                     let start = (j - self.k0) * self.k0;
-                    T::batched_linear_combination(msg, &parity_transposed[start..start + self.k0])
-                        == value
+                    let row = &parity_transposed[start..start + self.k0];
+                    let encoded: T = msg.iter().zip(row).map(|(&a, &b)| a * b).sum();
+                    encoded == value
                 }
             })
         } else {
@@ -197,7 +198,7 @@ impl<F: Field> BaseCode<F> for BaseCodeImpl<F> {
                     .iter_mut()
                     .zip(parity_transposed.chunks_exact(self.k0))
                 {
-                    *v = T::batched_linear_combination(msg, row);
+                    *v = msg.iter().zip(row).map(|(&a, &b)| a * b).sum();
                 }
             }
         }
