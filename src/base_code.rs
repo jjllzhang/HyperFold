@@ -175,7 +175,7 @@ impl<F: Field> BaseCode<F> for BaseCodeImpl<F> {
                     .iter_mut()
                     .zip(parity_transposed.chunks_exact(self.k0))
                 {
-                    *v = msg.iter().zip(row).map(|(&a, &b)| a * b).sum();
+                    *v = T::batched_linear_combination(msg, row);
                 }
             }
         }
