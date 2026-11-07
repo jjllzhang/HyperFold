@@ -133,6 +133,19 @@ impl PrimeCharacteristicRing for Mersenne127 {
         f
     }
     #[inline]
+    fn square(&self) -> Self {
+        // Three wide products; all intermediates fit u128 for canonical a < p.
+        // This is a separate reduction from Mul: do not remove Mul's Self::new.
+        let a0 = self.0 & u64::MAX as u128;
+        let a1 = self.0 >> 64;
+        let t0 = a0 * a0;
+        let t1 = a0 * (2 * a1) + (t0 >> 64);
+        let u = a1 * (2 * a1) + (t1 >> 63);
+        let v = (t0 & u64::MAX as u128) | ((t1 & ((1u128 << 63) - 1)) << 64);
+        let s = u + v;
+        Self((s & P) + (s >> 127))
+    }
+    #[inline]
     fn halve(&self) -> Self {
         Self((self.0 >> 1) | ((self.0 & 1) << 126))
     }
@@ -152,7 +165,19 @@ impl Field for Mersenne127 {
         if self.0 == 0 {
             None
         } else {
-            Some(self.pow_u128(P - 2))
+            // x_j = a^(2^j - 1); 126 squarings and 12 multiplies in total.
+            let x2 = self.square() * *self;
+            let x4 = x2.exp_power_of_2(2) * x2;
+            let x8 = x4.exp_power_of_2(4) * x4;
+            let x16 = x8.exp_power_of_2(8) * x8;
+            let x32 = x16.exp_power_of_2(16) * x16;
+            let x64 = x32.exp_power_of_2(32) * x32;
+            let x96 = x64.exp_power_of_2(32) * x32;
+            let x112 = x96.exp_power_of_2(16) * x16;
+            let x120 = x112.exp_power_of_2(8) * x8;
+            let x124 = x120.exp_power_of_2(4) * x4;
+            let x125 = x124.square() * *self;
+            Some(x125.exp_power_of_2(2) * *self)
         }
     }
     fn order() -> BigUint {
@@ -177,6 +202,11 @@ impl PrimeField for Mersenne127 {
     }
 }
 impl ExtensionAlgebra<Self, 2, Binomial<Self>> for Mersenne127 {
+    #[inline]
+    fn ext_square(a: &[Self; 2], out: &mut [Self; 2]) {
+        out[0] = (a[0] + a[1]) * (a[0] - a[1]);
+        out[1] = (a[0] * a[1]).double();
+    }
     fn ext_mul(a: &[Self; 2], b: &[Self; 2], out: &mut [Self; 2]) {
         let ac = a[0] * b[0];
         let bd = a[1] * b[1];
@@ -224,6 +254,101 @@ mod tests {
                 assert_eq!(x * x.inverse(), Mersenne127::ONE);
             }
         }
+    }
+    #[test]
+    fn specialized_squares_and_inverse_match_independent_reference() {
+        let p = BigUint::from(P);
+        let mut seed = 0x123456789abcdefu128;
+        let mut inputs = vec![
+            0,
+            1,
+            2,
+            P - 1,
+            P - 2,
+            (1 << 63) - 1,
+            1 << 63,
+            (1 << 64) - 1,
+            1 << 64,
+            (1 << 126) - 1,
+            1 << 126,
+            u128::MAX,
+        ];
+        inputs.extend((0..10_000).map(|_| next(&mut seed)));
+        for (index, &input) in inputs.iter().enumerate() {
+            let a = Mersenne127::new(input);
+            let b = Mersenne127::new(next(&mut seed));
+            let aa = BigUint::from(a.canonical());
+            let bb = BigUint::from(b.canonical());
+            assert_eq!(a.square().as_canonical_biguint(), (&aa * &aa) % &p);
+            assert_eq!(a.square(), a * a);
+            assert!(a.square().canonical() < P);
+            let z = M127Quad::new([a, b]);
+            let squared = z.square();
+            assert_eq!(squared, z * z);
+            let coefficients: &[Mersenne127] = squared.as_basis_coefficients_slice();
+            assert_eq!(
+                coefficients[0].as_canonical_biguint(),
+                ((&aa * &aa) + &p - ((&bb * &bb) % &p)) % &p
+            );
+            assert_eq!(
+                coefficients[1].as_canonical_biguint(),
+                (BigUint::from(2u8) * &aa * &bb) % &p
+            );
+            assert!(coefficients.iter().all(|x| x.canonical() < P));
+            if a.is_zero() {
+                assert!(a.try_inverse().is_none());
+            } else {
+                let inverse = a.inverse();
+                assert_eq!(a * inverse, Mersenne127::ONE);
+                assert!(inverse.canonical() < P);
+                if index < 128 {
+                    assert_eq!(
+                        inverse.as_canonical_biguint(),
+                        aa.modpow(&BigUint::from(P - 2), &p)
+                    );
+                    assert_eq!(inverse, a.pow_u128(P - 2));
+                }
+            }
+        }
+        // Original Mul still needs its final normalization for these canonical inputs.
+        let minus_one = Mersenne127::new(P - 1);
+        assert_eq!(minus_one * minus_one, Mersenne127::ONE);
+        assert_eq!(minus_one.square(), Mersenne127::ONE);
+        for a in [Mersenne127::ZERO, Mersenne127::ONE, minus_one] {
+            for z in [
+                M127Quad::new([a, a]),
+                M127Quad::new([a, Mersenne127::ZERO]),
+                M127Quad::new([Mersenne127::ZERO, a]),
+            ] {
+                assert_eq!(z.square(), z * z);
+            }
+        }
+    }
+    #[test]
+    fn inverse_chain_exponents_and_operation_count() {
+        // Mirror each straight-line instruction in try_inverse using integer exponents.
+        let mut squares = 0;
+        let mut multiplies = 0;
+        let mut step = |x: &BigUint, shift: usize, y: &BigUint| {
+            squares += shift;
+            multiplies += 1;
+            (x << shift) + y
+        };
+        let a = BigUint::from(1u8);
+        let x2 = step(&a, 1, &a);
+        let x4 = step(&x2, 2, &x2);
+        let x8 = step(&x4, 4, &x4);
+        let x16 = step(&x8, 8, &x8);
+        let x32 = step(&x16, 16, &x16);
+        let x64 = step(&x32, 32, &x32);
+        let x96 = step(&x64, 32, &x32);
+        let x112 = step(&x96, 16, &x16);
+        let x120 = step(&x112, 8, &x8);
+        let x124 = step(&x120, 4, &x4);
+        let x125 = step(&x124, 1, &a);
+        let exponent = step(&x125, 2, &a);
+        assert_eq!(exponent, BigUint::from(P - 2));
+        assert_eq!((squares, multiplies), (126, 12));
     }
     #[test]
     fn canonical_codec() {
