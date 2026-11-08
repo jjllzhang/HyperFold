@@ -33,6 +33,16 @@ pub trait BaseCode<F: Field>: Send + Sync {
     fn k0(&self) -> usize;
     fn n0(&self) -> usize;
     fn encode_slice<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]);
+    /// Compare every supplied coordinate against the same complete encoded message.
+    /// Invalid shapes/indices fail; duplicate indices are compared independently.
+    fn check_encoded_at<T: Field + Algebra<F>>(&self, msg: &[T], expected: &[(usize, T)]) -> bool {
+        if msg.len() != self.k0() || expected.iter().any(|&(j, _)| j >= self.n0()) {
+            return false;
+        }
+        let mut encoded = vec![T::ZERO; self.n0()];
+        self.encode_slice(msg, &mut encoded);
+        expected.iter().all(|&(j, value)| encoded[j] == value)
+    }
     fn encode_base_slice(&self, msg: &[F], out: &mut [F]) {
         self.encode_slice(msg, out)
     }
@@ -120,6 +130,29 @@ impl<F: Field> BaseCode<F> for BaseCodeImpl<F> {
     }
     fn n0(&self) -> usize {
         self.k0 * self.c
+    }
+    fn check_encoded_at<T: Field + Algebra<F>>(&self, msg: &[T], expected: &[(usize, T)]) -> bool {
+        if msg.len() != self.k0 || expected.iter().any(|&(j, _)| j >= self.n0()) {
+            return false;
+        }
+        if let Encoder::Lagrange { parity_transposed } = &self.encoder {
+            // Borrow existing pairs and coefficient rows, preserving all duplicate expectations.
+            expected.iter().all(|&(j, value)| {
+                if j < self.k0 {
+                    msg[j] == value
+                } else {
+                    let start = (j - self.k0) * self.k0;
+                    let row = &parity_transposed[start..start + self.k0];
+                    let encoded: T = msg.iter().zip(row).map(|(&a, &b)| a * b).sum();
+                    encoded == value
+                }
+            })
+        } else {
+            // QA and coefficient-message FFT retain the full-encoding fallback.
+            let mut encoded = vec![T::ZERO; self.n0()];
+            self.encode_slice(msg, &mut encoded);
+            expected.iter().all(|&(j, value)| encoded[j] == value)
+        }
     }
     fn encode_slice<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]) {
         assert_eq!(msg.len(), self.k0);

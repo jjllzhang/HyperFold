@@ -3,8 +3,12 @@
 
 import argparse
 import csv
+from contextlib import ExitStack
+from datetime import datetime, timezone
+import hashlib
 import io
 import math
+import json
 import os
 from pathlib import Path
 import shutil
@@ -65,26 +69,84 @@ def update_result(path, result):
             temporary.unlink(missing_ok=True)
 
 
-def run_process(command):
-    """Reap this workload's process group on completion, failure or interruption."""
-    proc = subprocess.Popen(command, start_new_session=True)
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def event(root, kind, **fields):
+    """Append and sync before launch; a missing terminal event means unknown."""
+    if root is not None:
+        with (root / "events.jsonl").open("a") as stream:
+            stream.write(json.dumps(dict(event=kind, utc=utc_now(), **fields)) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def memory_snapshot():
+    keys = {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}
+    return {
+        key: value.strip()
+        for line in Path("/proc/meminfo").read_text().splitlines()
+        for key, value in [line.split(":", 1)]
+        if key in keys
+    }
+
+
+def reap_group(proc):
+    """Reap only the new session created for this workload."""
     try:
-        return proc.wait()
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
     finally:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def run_process(command, *, archive=None, prefix=None, identity=None):
+    """Persist launch intent before Popen; always reap after wait/error/interrupt."""
+    proc = None
+    outcome = "unknown"
+    error = None
+    code = None
+    with ExitStack() as stack:
+        logs = {}
+        if archive is not None:
+            for name in ("stdout", "stderr"):
+                path = archive / f"{prefix}.{name}.log"
+                logs[name] = stack.enter_context(path.open("x"))
+        event(archive, "process_start", command=command, identity=identity,
+              prefix=prefix, pid=None, pgid=None, status="launching",
+              affinity=sorted(os.sched_getaffinity(0)), memory=memory_snapshot())
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            proc = subprocess.Popen(command, start_new_session=True, **logs)
+            event(archive, "process_started", prefix=prefix, pid=proc.pid,
+                  pgid=proc.pid, status="running")
+            code = proc.wait()
+            outcome = "exited" if code is not None else "unknown"
+            return code
+        except BaseException as exc:
+            outcome = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
+            error = repr(exc)
+            raise
         finally:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                if proc is not None:
+                    reap_group(proc)
+            finally:
+                event(archive, "process_end", prefix=prefix,
+                      pid=None if proc is None else proc.pid,
+                      pgid=None if proc is None else proc.pid,
+                      status=outcome, returncode=code,
+                      reaped_returncode=None if proc is None else proc.returncode,
+                      error=error, memory=memory_snapshot())
 
 
 def read_round(path, job, round_number, repetitions):
@@ -102,6 +164,11 @@ def read_round(path, job, round_number, repetitions):
             or int(row["trial_round"]) != round_number
         ):
             raise ValueError("unexpected benchmark case or schema")
+        for key in ("mu0", "depth", "extension_degree", "queries", "threads",
+                    "first_tree_strategy", "parameter_lifecycle", "witness_lifecycle",
+                    "setup_per_trial"):
+            if key in job and row.get(key) != job[key]:
+                raise ValueError(f"unexpected benchmark identity: {key}")
     return rows
 
 
@@ -119,90 +186,149 @@ def batch_result(job, samples):
     return result
 
 
-def run(args):
+def execute(args, root, archive):
     physical = {}
     for cpu in sorted(os.sched_getaffinity(0)):
         topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
         core = (
-            (topology / "physical_package_id").read_text(),
-            (topology / "core_id").read_text(),
+            (topology / "physical_package_id").read_text().strip(),
+            (topology / "core_id").read_text().strip(),
         )
         physical.setdefault(core, cpu)
-    os.sched_setaffinity(0, list(physical.values())[:32])
-    failed = False
-    with tempfile.TemporaryDirectory(prefix="hyperfold-benchmark-") as temporary:
-        root = Path(temporary)
-        binary = root / "bench"
-        shutil.copy2(args.binary.resolve(), binary)
-        selection = [
-            "--threads",
-            "32",
-            "--fields",
-            args.fields,
-            "--backends",
-            args.backends,
-            "--mu",
-            args.mu,
-            "--r",
-            args.r,
-            "--c",
-            args.c,
-        ]
-        listing = subprocess.check_output(
-            [str(binary), "--list", *selection], text=True
+    if len(physical) < 32:
+        raise ValueError("benchmark requires at least32 distinct physical cores")
+    selected = list(physical.values())[:32]
+    os.sched_setaffinity(0, selected)
+    if set(os.sched_getaffinity(0)) != set(selected):
+        raise ValueError("benchmark affinity was not applied")
+    binary = root / "bench"
+    source_sha = hashlib.sha256(args.binary.resolve().read_bytes()).hexdigest()
+    shutil.copy2(args.binary.resolve(), binary)
+    binary_sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    event(archive, "binary_copied", source=str(args.binary.resolve()),
+          source_sha256=source_sha, binary_sha256=binary_sha)
+    if binary_sha != source_sha:
+        raise ValueError("copied binary identity mismatch")
+    if archive is not None:
+        metadata = dict(
+            schema="hyperfold-pcs-run-v1", start_utc=utc_now(),
+            binary_source=str(args.binary.resolve()),
+            binary_sha256=binary_sha,
+            binary_bytes=binary.stat().st_size,
+            runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            affinity=selected,
+            physical_cores=[dict(socket=socket, core=core, cpu=cpu)
+                            for (socket, core), cpu in physical.items() if cpu in selected],
+            output_dir=str(args.output_dir.resolve()), role=args.role,
+            rounds=args.rounds, repetitions=args.repetitions, warmups_per_process=1,
+            memory=memory_snapshot(),
+            build_provenance="bind this copied binary SHA to the external build/freeze record",
         )
-        jobs = list(csv.DictReader(io.StringIO(listing)))
-        for index, job in enumerate(jobs):
-            path = result_path(args.output_dir, job)
-            samples = []
+        (root / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    selection = [
+        "--threads", "32", "--fields", args.fields, "--backends", args.backends,
+        "--mu", args.mu, "--r", args.r, "--c", args.c,
+    ]
+    if archive is None:
+        listing = subprocess.check_output([str(binary), "--list", *selection], text=True)
+    else:
+        code = run_process([str(binary), "--list", *selection], archive=archive,
+                           prefix="selection", identity={"role": "list_only"})
+        if code != 0:
+            raise ValueError(f"selection process failed: exit{code}")
+        listing = (root / "selection.stdout.log").read_text()
+    jobs = list(csv.DictReader(io.StringIO(listing)))
+    jobs.sort(key=lambda j: (int(j["mu"]), j["field"].lower(), int(j["r"]),
+                            int(j["c"]), j["backend"].lower()))
+    keys = [(j["field"].lower(), j["backend"].lower(), *config_key(j)) for j in jobs]
+    if not jobs or len(set(keys)) != len(jobs):
+        raise ValueError("empty or duplicate configuration selection")
+    if archive is not None:
+        with (root / "selection.csv").open("x", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(jobs[0]))
+            writer.writeheader()
+            writer.writerows(jobs)
+    failed = False
+    for index, job in enumerate(jobs):
+        path = result_path(args.output_dir, job)
+        samples = []
+        event(archive, "case_start", index=index, config=job)
+        try:
             for round_number in range(1, args.rounds + 1):
-                output = root / f"case-{index}-round-{round_number}.csv"
+                prefix = f"case-{index}-round-{round_number}"
+                output = root / f"{prefix}.csv"
                 command = [
-                    str(binary),
-                    "--fields",
-                    job["field"].lower(),
-                    "--backends",
-                    job["backend"].lower(),
-                    "--mu",
-                    job["mu"],
-                    "--r",
-                    job["r"],
-                    "--c",
-                    job["c"],
-                    "--threads",
-                    "32",
-                    "--trial-round",
-                    str(round_number),
-                    "--repetitions",
-                    str(args.repetitions),
-                    "--output",
-                    str(output),
+                    str(binary), "--fields", job["field"].lower(),
+                    "--backends", job["backend"].lower(), "--mu", job["mu"],
+                    "--r", job["r"], "--c", job["c"], "--threads", "32",
+                    "--trial-round", str(round_number),
+                    "--repetitions", str(args.repetitions), "--output", str(output),
                 ]
-                code = run_process(command)
-                if code:
-                    print(
-                        f"benchmark failed: {path.name} {config_key(job)}, round {round_number}, exit {code}",
-                        file=sys.stderr,
-                    )
+                if archive is None:
+                    code = run_process(command)
+                else:
+                    code = run_process(command, archive=archive, prefix=prefix,
+                                       identity=dict(index=index, config=job,
+                                                     round=round_number,
+                                                     repetitions=args.repetitions))
+                if code != 0:
+                    event(archive, "case_end", index=index,
+                          status="unknown" if code is None else "failed",
+                          returncode=code, round=round_number)
+                    print(f"benchmark failed: {path.name} {config_key(job)}, "
+                          f"round{round_number}, exit{code}", file=sys.stderr)
                     failed = True
                     break
-                samples.extend(
-                    read_round(
-                        output.with_suffix(".raw.csv"),
-                        job,
-                        round_number,
-                        args.repetitions,
-                    )
-                )
+                current = read_round(output.with_suffix(".raw.csv"), job,
+                                     round_number, args.repetitions)
+                samples.extend(current)
+                event(archive, "round_validated", index=index, round=round_number,
+                      samples=len(current), raw=output.with_suffix(".raw.csv").name)
             else:
                 result = batch_result(job, samples)
+                event(archive, "case_validated", index=index, result=result,
+                      samples=len(samples))
                 if args.role == "protocol_performance":
                     update_result(path, result)
-                    print(f"updated {path.name}: {config_key(job)}")
+                    print(f"updated {path.name}: {config_key(job)}", flush=True)
+                event(archive, "case_end", index=index, status="complete",
+                      table_written=args.role == "protocol_performance")
                 continue
-            if not args.continue_on_failure:
-                break
+        except BaseException as error:
+            event(archive, "case_end", index=index,
+                  status="interrupted" if isinstance(error, KeyboardInterrupt) else "error",
+                  error=repr(error))
+            raise
+        if not args.continue_on_failure:
+            break
     return 1 if failed else 0
+
+
+def run(args):
+    raw_dir = getattr(args, "raw_dir", None)
+    with ExitStack() as stack:
+        if raw_dir is None:
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory(
+                prefix="hyperfold-benchmark-")))
+            archive = None
+        else:
+            provided = Path(raw_dir)
+            if provided.exists() or provided.is_symlink():
+                raise FileExistsError(f"raw directory must be new: {provided}")
+            root = provided.resolve()
+            root.mkdir(parents=True, exist_ok=False)
+            archive = root
+        event(archive, "run_start", runner_pid=os.getpid(), status="started")
+        try:
+            code = execute(args, root, archive)
+        except BaseException as error:
+            event(archive, "run_end",
+                  status="interrupted" if isinstance(error, KeyboardInterrupt) else "error",
+                  returncode=None, error=repr(error))
+            raise
+        event(archive, "run_end", status="complete" if code == 0 else "failed",
+              returncode=code)
+        return code
 
 
 def main():
@@ -213,6 +339,10 @@ def main():
         type=Path,
         default=ROOT / "results",
         help="read/update the four field/code CSVs here",
+    )
+    parser.add_argument(
+        "--raw-dir", type=Path,
+        help="new, previously absent directory retaining copied binary, samples and logs",
     )
     parser.add_argument("--fields", default="goldilocks,m127")
     parser.add_argument("--backends", default="qa,rs")

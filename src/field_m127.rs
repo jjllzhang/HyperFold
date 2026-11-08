@@ -226,6 +226,75 @@ mod tests {
         }
     }
     #[test]
+    fn canonical_squares_and_inverse_match_independent_reference() {
+        let p = BigUint::from(P);
+        let mut seed = 0x123456789abcdefu128;
+        let mut inputs = vec![
+            0,
+            1,
+            2,
+            P - 1,
+            P - 2,
+            (1 << 63) - 1,
+            1 << 63,
+            (1 << 64) - 1,
+            1 << 64,
+            (1 << 126) - 1,
+            1 << 126,
+            u128::MAX,
+        ];
+        inputs.extend((0..10_000).map(|_| next(&mut seed)));
+        for (index, &input) in inputs.iter().enumerate() {
+            let a = Mersenne127::new(input);
+            let b = Mersenne127::new(next(&mut seed));
+            let aa = BigUint::from(a.canonical());
+            let bb = BigUint::from(b.canonical());
+            assert_eq!(a.square().as_canonical_biguint(), (&aa * &aa) % &p);
+            assert_eq!(a.square(), a * a);
+            assert!(a.square().canonical() < P);
+            let z = M127Quad::new([a, b]);
+            let squared = z.square();
+            assert_eq!(squared, z * z);
+            let coefficients: &[Mersenne127] = squared.as_basis_coefficients_slice();
+            assert_eq!(
+                coefficients[0].as_canonical_biguint(),
+                ((&aa * &aa) + &p - ((&bb * &bb) % &p)) % &p
+            );
+            assert_eq!(
+                coefficients[1].as_canonical_biguint(),
+                (BigUint::from(2u8) * &aa * &bb) % &p
+            );
+            assert!(coefficients.iter().all(|x| x.canonical() < P));
+            if a.is_zero() {
+                assert!(a.try_inverse().is_none());
+            } else {
+                let inverse = a.inverse();
+                assert_eq!(a * inverse, Mersenne127::ONE);
+                assert!(inverse.canonical() < P);
+                if index < 128 {
+                    assert_eq!(
+                        inverse.as_canonical_biguint(),
+                        aa.modpow(&BigUint::from(P - 2), &p)
+                    );
+                    assert_eq!(inverse, a.pow_u128(P - 2));
+                }
+            }
+        }
+        // Original Mul still needs its final normalization for these canonical inputs.
+        let minus_one = Mersenne127::new(P - 1);
+        assert_eq!(minus_one * minus_one, Mersenne127::ONE);
+        assert_eq!(minus_one.square(), Mersenne127::ONE);
+        for a in [Mersenne127::ZERO, Mersenne127::ONE, minus_one] {
+            for z in [
+                M127Quad::new([a, a]),
+                M127Quad::new([a, Mersenne127::ZERO]),
+                M127Quad::new([Mersenne127::ZERO, a]),
+            ] {
+                assert_eq!(z.square(), z * z);
+            }
+        }
+    }
+    #[test]
     fn canonical_codec() {
         for n in [0, 1, P - 1] {
             let x = Mersenne127::new(n);

@@ -3,6 +3,8 @@
 import argparse
 import csv
 import io
+import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -271,6 +273,210 @@ sys.exit(7 if fail else 0)
             pid = int(pid_path.read_text())
             state = Path(f"/proc/{pid}/stat")
             self.assertTrue(not state.exists() or state.read_text().split()[2] == "Z")
+
+
+    def events(self, root):
+        return [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+
+    def test_persistent_success_retains_identity_selection_logs_and_samples(self):
+        root = self.root / "archive"
+        os.environ["HF_TEST_PRIVATE_VALUE"] = "must-not-be-dumped"
+        self.assertEqual(self.run_quiet(raw_dir=root), 0)
+        self.assertEqual((root / "bench").read_bytes(), self.binary.read_bytes())
+        meta = json.loads((root / "run.json").read_text())
+        self.assertEqual(meta["binary_sha256"], hashlib.sha256(self.binary.read_bytes()).hexdigest())
+        self.assertEqual(len(meta["affinity"]), 32)
+        self.assertEqual(len({(x["socket"], x["core"]) for x in meta["physical_cores"]}), 32)
+        self.assertNotIn("must-not-be-dumped", (root / "run.json").read_text())
+        selection = bench.read_csv(root / "selection.csv")
+        self.assertEqual(len(selection), 4)
+        events = self.events(root)
+        ends = [e for e in events if e["event"] == "process_end"]
+        self.assertEqual(len(ends), 5)  # list-only child is separately recorded
+        self.assertTrue(all(e["returncode"] == 0 and e["status"] == "exited" for e in ends))
+        for index in range(4):
+            prefix = f"case-{index}-round-1"
+            self.assertEqual(len(bench.read_csv(root / (prefix + ".raw.csv"))), 2)
+            self.assertTrue((root / (prefix + ".stdout.log")).exists())
+            self.assertTrue((root / (prefix + ".stderr.log")).exists())
+            start = next(e for e in events if e["event"] == "process_start" and e["prefix"] == prefix)
+            live = next(e for e in events if e["event"] == "process_started" and e["prefix"] == prefix)
+            self.assertIsNone(start["pid"])
+            self.assertEqual(live["pid"], live["pgid"])
+            self.assertLess(events.index(start), events.index(live))
+        self.assertEqual(events[-1]["status"], "complete")
+        del os.environ["HF_TEST_PRIVATE_VALUE"]
+
+    def test_existing_raw_directory_and_dangling_symlink_are_rejected(self):
+        root = self.root / "archive"
+        root.mkdir()
+        (root / "sentinel").write_text("unchanged")
+        with self.assertRaises(FileExistsError):
+            self.run_quiet(raw_dir=root)
+        self.assertEqual(list(root.iterdir()), [root / "sentinel"])
+        link = self.root / "link"
+        link.symlink_to(self.root / "absent")
+        with self.assertRaises(FileExistsError):
+            self.run_quiet(raw_dir=link)
+        self.assertFalse((self.root / "absent").exists())
+
+    def test_default_still_removes_temporary_binary_and_raw_directory(self):
+        targets = []
+        original = bench.shutil.copy2
+        def copy(source, target):
+            targets.append(Path(target))
+            return original(source, target)
+        with mock.patch.object(bench.shutil, "copy2", side_effect=copy):
+            self.assertEqual(self.run_quiet(fields="m127", backends="qa"), 0)
+        self.assertEqual(len(targets), 1)
+        self.assertFalse(targets[0].parent.exists())
+
+    def test_persistent_later_round_failure_retains_partial_and_old_table(self):
+        path = self.seed()
+        before = path.read_bytes()
+        root = self.root / "archive"
+        os.environ["HF_TEST_FAIL_AT"] = "2"
+        self.assertEqual(self.run_quiet(fields="m127", backends="qa", rounds=2, raw_dir=root), 1)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((root / "case-0-round-2.raw.csv").exists())
+        events = self.events(root)
+        self.assertEqual(events[-1]["status"], "failed")
+        self.assertTrue(any(e["event"] == "process_end" and e["returncode"] == 7 for e in events))
+        self.assertFalse(any(e["event"] == "case_validated" for e in events))
+
+    def test_persistent_short_sample_schema_and_parse_errors_leave_evidence(self):
+        original = bench.read_round
+        for mode in ("short", "schema", "parse"):
+            root = self.root / mode
+            self.output = self.root / (mode + "-results")
+            path = self.seed()
+            before = path.read_bytes()
+            def read(path, job, rd, repetitions):
+                if mode == "schema":
+                    text = path.read_text().replace(bench.SCHEMA, "bad-schema")
+                    path.write_text(text)
+                if mode == "parse":
+                    raise ValueError("synthetic parse error")
+                return original(path, job, rd, repetitions)
+            os.environ["HF_TEST_SHORT_AT"] = "1" if mode == "short" else "0"
+            (self.root / "counter").unlink(missing_ok=True)
+            with mock.patch.object(bench, "read_round", side_effect=read):
+                with self.assertRaises(ValueError):
+                    self.run_quiet(fields="m127", backends="qa", raw_dir=root)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(self.events(root)[-1]["status"], "error")
+            self.assertTrue((root / "case-0-round-1.raw.csv").exists())
+
+    def test_persistent_unknown_exit_never_validates_even_with_complete_csv(self):
+        root = self.root / "archive"
+        original = subprocess.Popen
+        def launch(command, **kwargs):
+            proc = original(command, **kwargs)
+            if "--list" not in command:
+                wait = proc.wait
+                first = True
+                def unknown(*a, **kw):
+                    nonlocal first
+                    code = wait(*a, **kw)
+                    if first:
+                        first = False
+                        return None
+                    return code
+                proc.wait = unknown
+            return proc
+        with mock.patch.object(bench.subprocess, "Popen", side_effect=launch):
+            self.assertEqual(self.run_quiet(fields="m127", backends="qa", raw_dir=root), 1)
+        self.assertEqual(len(bench.read_csv(root / "case-0-round-1.raw.csv")), 2)
+        events = self.events(root)
+        self.assertTrue(any(e["event"] == "process_end" and e["status"] == "unknown" for e in events))
+        self.assertFalse(any(e["event"] == "case_validated" for e in events))
+        self.assertFalse(self.output.exists())
+
+    def test_persistent_interrupt_reaps_and_records_non_success(self):
+        root = self.root / "archive"
+        original = subprocess.Popen
+        children = []
+        def launch(command, **kwargs):
+            proc = original(command, **kwargs)
+            if "--list" not in command:
+                children.append(proc)
+                wait = proc.wait
+                first = True
+                def interrupt(*a, **kw):
+                    nonlocal first
+                    if first:
+                        first = False
+                        raise KeyboardInterrupt()
+                    return wait(*a, **kw)
+                proc.wait = interrupt
+            return proc
+        with mock.patch.object(bench.subprocess, "Popen", side_effect=launch):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_quiet(fields="m127", backends="qa", raw_dir=root)
+        self.assertIsInstance(children[0].poll(), int)
+        events = self.events(root)
+        self.assertEqual(events[-1]["status"], "interrupted")
+        end = next(e for e in events if e["event"] == "process_end" and e["prefix"] == "case-0-round-1")
+        self.assertEqual(end["status"], "interrupted")
+        self.assertIsNone(end["returncode"])
+        self.assertFalse(self.output.exists())
+
+    def test_persistent_launch_failure_is_not_an_unknown_success(self):
+        root = self.root / "archive"
+        original = subprocess.Popen
+        def launch(command, **kwargs):
+            if "--list" not in command:
+                raise OSError("synthetic launch failure")
+            return original(command, **kwargs)
+        with mock.patch.object(bench.subprocess, "Popen", side_effect=launch):
+            with self.assertRaises(OSError):
+                self.run_quiet(fields="m127", backends="qa", raw_dir=root)
+        events = self.events(root)
+        end = next(e for e in events if e["event"] == "process_end" and e["prefix"] == "case-0-round-1")
+        self.assertEqual(end["status"], "error")
+        self.assertIsNone(end["pid"])
+        self.assertEqual(events[-1]["status"], "error")
+        self.assertFalse(self.output.exists())
+
+    def test_archive_write_failure_does_not_fall_back_or_publish(self):
+        root = self.root / "archive"
+        original = bench.event
+        def fail(root, kind, **fields):
+            if kind == "case_validated":
+                raise OSError("synthetic archive failure")
+            return original(root, kind, **fields)
+        with mock.patch.object(bench, "event", side_effect=fail):
+            with self.assertRaises(OSError):
+                self.run_quiet(fields="m127", backends="qa", raw_dir=root)
+        self.assertTrue((root / "case-0-round-1.raw.csv").exists())
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.events(root)[-1]["status"], "error")
+
+    def test_insufficient_cores_and_binary_copy_mismatch_fail_before_workload(self):
+        root = self.root / "few-cores"
+        with mock.patch.object(bench.os, "sched_getaffinity", return_value={0}):
+            with self.assertRaises(ValueError):
+                self.run_quiet(raw_dir=root)
+        self.assertEqual(self.events(root)[-1]["status"], "error")
+        original = bench.shutil.copy2
+        def corrupt(source, target):
+            original(source, target)
+            with Path(target).open("ab") as f:
+                f.write(b"\n")
+        root = self.root / "bad-copy"
+        with mock.patch.object(bench.shutil, "copy2", side_effect=corrupt):
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                self.run_quiet(raw_dir=root)
+        self.assertEqual(self.events(root)[-1]["status"], "error")
+        self.assertFalse((root / "selection.stdout.log").exists())
+        self.assertFalse(self.output.exists())
+
+    def test_optional_certified_identity_is_checked_when_listed(self):
+        self.run_quiet(fields="m127", backends="qa", raw_dir=self.root / "archive")
+        raw = self.root / "archive/case-0-round-1.raw.csv"
+        job = dict(schema_version=bench.SCHEMA, field="M127", backend="Qa", mu="20",r="2",c="4",threads="32")
+        with self.assertRaisesRegex(ValueError, "threads"):
+            bench.read_round(raw, job, 1, 2)
 
 
 if __name__ == "__main__":
