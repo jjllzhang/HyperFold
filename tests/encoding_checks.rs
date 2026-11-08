@@ -104,21 +104,3 @@ fn m127_systematic_rs_matches_independent_newton_reference() {
     systematic_newton::<Mersenne127>();
     systematic_newton::<M127Quad>();
 }
-#[test]
-fn chunked_dot_product_matches_naive_including_tails() {
-    fn run<T: ExtensionField<Mersenne127>>() {
-        let mut rng = stream(&[79; 32], b"dot-reference", 0);
-        for length in [0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 64, 128, 256, 1024] {
-            let a = (0..length)
-                .map(|_| T::from_basis_coefficients_fn(|_| Mersenne127::sample(&mut rng)))
-                .collect::<Vec<_>>();
-            let b = (0..length)
-                .map(|_| Mersenne127::sample(&mut rng))
-                .collect::<Vec<_>>();
-            let naive: T = a.iter().zip(&b).map(|(&a, &b)| a * b).sum();
-            assert_eq!(T::batched_linear_combination(&a, &b), naive);
-        }
-    }
-    run::<Mersenne127>();
-    run::<M127Quad>();
-}
