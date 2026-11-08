@@ -14,7 +14,7 @@ This is experimental research software, not an audited or production-ready crypt
 | Path | Purpose |
 |---|---|
 | `src/pcs.rs` | Setup, commitment, one-shot opening and verification |
-| `src/{base_code,matrix_h,encoder}.rs` | Base codes, QA matrices and recursive encoding |
+| `src/{base_code,matrix_h,encoder}.rs` | Base codes, local mixing matrices and recursive encoding |
 | `src/{sumcheck,transcript,merkle_commitment,codec}.rs` | Sumcheck, challenges, Merkle commitments and serialization |
 | `src/field_m127.rs` | M127 arithmetic and its quadratic extension |
 | `src/{params,certified_params}.rs` | Certified configurations and parameter validation |
@@ -53,16 +53,27 @@ cargo test --release --locked -- --test-threads=1
 
 The release profile uses optimization level 3, ThinLTO and one codegen unit. `target-cpu=native` targets the build host, so rebuild on the measurement machine and record the compiler and flags. The correctness tests do not run the full performance grid; golden tests cover both one-thread and 32-thread execution.
 
-Install plotting dependencies, preferably in an isolated environment, then run the script regression checks:
+Install plotting dependencies, preferably in an isolated environment:
 
 ```sh
 python3 -m venv ../hyperfold-venv
 . ../hyperfold-venv/bin/activate
 python3 -m pip install -r scripts/requirements-plot.txt
+```
+
+The **complete 31-test Python suite also requires Linux and at least 32 distinct physical cores in the allowed CPU set**, because it exercises the runner's CPU-affinity checks. Its synthetic CLI and temporary fixtures do not measure PCS performance or replace the bundled result tables:
+
+```sh
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
-Plotting is pinned to **Matplotlib 3.10.6**. The Python tests use temporary fixtures rather than replacing the bundled result tables.
+On a machine with fewer allowed physical cores, run only the plotting tests instead. Passing this subset is **not** a pass of the complete 31-test suite:
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_plot_results.py' -v
+```
+
+Plotting is pinned to **Matplotlib 3.10.6**.
 
 ## Run HyperFold benchmarks
 
