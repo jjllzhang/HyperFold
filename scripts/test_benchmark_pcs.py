@@ -477,6 +477,10 @@ sys.exit(7 if fail else 0)
         job = dict(schema_version=bench.SCHEMA, field="M127", backend="Qa", mu="20",r="2",c="4",threads="32")
         with self.assertRaisesRegex(ValueError, "threads"):
             bench.read_round(raw, job, 1, 2)
+        job.pop("threads")
+        job["local_matrix"] = "add37"
+        with self.assertRaisesRegex(ValueError, "local_matrix"):
+            bench.read_round(raw, job, 1, 2)
 
 
 if __name__ == "__main__":

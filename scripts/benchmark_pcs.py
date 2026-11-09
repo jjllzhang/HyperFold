@@ -166,7 +166,7 @@ def read_round(path, job, round_number, repetitions):
             raise ValueError("unexpected benchmark case or schema")
         for key in ("mu0", "depth", "extension_degree", "queries", "threads",
                     "first_tree_strategy", "parameter_lifecycle", "witness_lifecycle",
-                    "setup_per_trial"):
+                    "setup_per_trial", "local_matrix"):
             if key in job and row.get(key) != job[key]:
                 raise ValueError(f"unexpected benchmark identity: {key}")
     return rows

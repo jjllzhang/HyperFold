@@ -1,4 +1,5 @@
 //! One complete fresh-Setup trial shared by the CLI and Criterion.
+use crate::matrix_h::LocalMatrixKind;
 use crate::{
     codec,
     params::HyperFoldConfig,
@@ -28,9 +29,16 @@ pub struct TrialRecord {
 pub fn run_trial<F: SampleBase, E: ExtensionField<F>>(
     config: HyperFoldConfig,
 ) -> Result<TrialRecord> {
+    run_trial_with_local_matrix::<F, E>(config, LocalMatrixKind::Pascal8)
+}
+/// Identical phase boundaries for paired matrix experiments.
+pub fn run_trial_with_local_matrix<F: SampleBase, E: ExtensionField<F>>(
+    config: HyperFoldConfig,
+    local_matrix: LocalMatrixKind,
+) -> Result<TrialRecord> {
     let wall = Instant::now();
     let timer = Instant::now();
-    let pcs = HyperFoldPcs::<F, E>::setup(config, [42; 32])?;
+    let pcs = HyperFoldPcs::<F, E>::setup_with_local_matrix(config, [42; 32], local_matrix)?;
     let setup = ms(timer.elapsed());
     let timer = Instant::now();
     let mut rng = stream(&[27; 32], b"benchmark-message", config.mu as u64);

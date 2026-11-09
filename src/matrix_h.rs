@@ -1,7 +1,68 @@
-//! The exact H₂ᵀ, corrected H₄ᵀ, and symmetric Pascal P₈ operators.
+//! Exact H₂ᵀ, corrected H₄ᵀ, Pascal P₈, and optional 37-addition H₈ᵀ operators.
 use p3_field::{Algebra, Field};
+/// The r=8 matrix. Other arities retain their historical operators.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LocalMatrixKind {
+    #[default]
+    Pascal8,
+    Add37,
+}
+impl LocalMatrixKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pascal8 => "pascal8",
+            Self::Add37 => "add37",
+        }
+    }
+}
+const ADD37_MATRIX: [usize; 64] = [
+    26, 3, 6, 25, 31, 46, 30, 2, 21, 4, 5, 23, 30, 38, 28, 3, 16, 16, 7, 16, 30, 23, 23, 11, 43,
+    31, 17, 41, 72, 65, 59, 23, 33, 6, 8, 32, 43, 56, 41, 5, 7, 10, 5, 6, 12, 9, 8, 6, 12, 5, 3,
+    13, 21, 20, 18, 5, 19, 13, 8, 17, 28, 28, 23, 9,
+];
+const ADD37_GATES: [(usize, usize); 37] = [
+    (6, 4),
+    (3, 8),
+    (9, 5),
+    (7, 8),
+    (5, 0),
+    (2, 12),
+    (12, 10),
+    (14, 14),
+    (13, 15),
+    (16, 15),
+    (1, 11),
+    (8, 17),
+    (19, 9),
+    (20, 20),
+    (18, 4),
+    (22, 3),
+    (10, 23),
+    (23, 1),
+    (25, 13),
+    (18, 26),
+    (21, 27),
+    (28, 21),
+    (28, 11),
+    (29, 24),
+    (30, 0),
+    (29, 17),
+    (22, 32),
+    (29, 32),
+    (26, 27),
+    (36, 36),
+    (34, 24),
+    (34, 37),
+    (25, 39),
+    (30, 39),
+    (39, 41),
+    (16, 37),
+    (43, 32),
+];
+const ADD37_OUTPUTS: [usize; 8] = [33, 31, 40, 42, 35, 43, 38, 44];
 #[derive(Debug)]
 pub struct LocalMatrix<F> {
+    kind: LocalMatrixKind,
     pub r: usize,
     pub matrix: Vec<F>,
     pub inverse: Vec<F>,
@@ -14,20 +75,32 @@ fn binom(n: usize, k: usize) -> usize {
 }
 impl<F: Field> LocalMatrix<F> {
     pub fn new(r: usize) -> Self {
+        Self::new_with_kind(r, LocalMatrixKind::Pascal8)
+    }
+    /// Add37 is defined only for r=8; the legacy constructor remains unchanged.
+    pub fn new_with_kind(r: usize, kind: LocalMatrixKind) -> Self {
         assert!([2, 4, 8].contains(&r));
+        assert!(kind == LocalMatrixKind::Pascal8 || r == 8);
         let matrix = if r == 2 {
             [1, 1, 1, 2].map(F::from_usize).to_vec()
         } else if r == 4 {
             [2, 3, 1, 1, 1, 2, 3, 4, 1, 1, 2, 3, 3, 4, 1, 2]
                 .map(F::from_usize)
                 .to_vec()
+        } else if kind == LocalMatrixKind::Add37 {
+            ADD37_MATRIX.map(F::from_usize).to_vec()
         } else {
             (0..r)
                 .flat_map(|i| (0..r).map(move |j| F::from_usize(binom(i + j, i))))
                 .collect()
         };
         let inverse = invert(&matrix, r);
-        Self { r, matrix, inverse }
+        Self {
+            kind,
+            r,
+            matrix,
+            inverse,
+        }
     }
     pub fn forward<T: Field + Algebra<F>>(&self, x: &mut [T; 8], diag: &[F]) {
         for a in 1..self.r {
@@ -51,6 +124,16 @@ impl<F: Field> LocalMatrix<F> {
                 x[2] = w2;
                 x[3] = w0 + t013;
             }
+            8 if self.kind == LocalMatrixKind::Add37 => {
+                let mut v = [T::ZERO; 45];
+                v[..8].copy_from_slice(x);
+                for (i, &(a, b)) in ADD37_GATES.iter().enumerate() {
+                    v[i + 8] = v[a] + v[b];
+                }
+                for (dst, src) in x.iter_mut().zip(ADD37_OUTPUTS) {
+                    *dst = v[src];
+                }
+            }
             8 => {
                 pascal_upper(x, false);
                 pascal_lower(x, false);
@@ -65,14 +148,16 @@ impl<F: Field> LocalMatrix<F> {
                 x[0] -= b;
                 x[1] = b;
             }
-            8 => {
+            8 if self.kind == LocalMatrixKind::Pascal8 => {
                 pascal_lower(x, true);
                 pascal_upper(x, true);
             }
-            4 => {
+            4 | 8 => {
                 let old = *x;
-                for (i, v) in x.iter_mut().enumerate().take(4) {
-                    *v = (0..4).map(|j| old[j] * self.inverse[i * 4 + j]).sum();
+                for (i, v) in x.iter_mut().enumerate().take(self.r) {
+                    *v = (0..self.r)
+                        .map(|j| old[j] * self.inverse[i * self.r + j])
+                        .sum();
                 }
             }
             _ => unreachable!(),
@@ -154,9 +239,17 @@ mod tests {
     };
     use p3_field::extension::CubicTrinomialExtensionField;
     use p3_goldilocks::Goldilocks;
+    fn cases() -> [(usize, LocalMatrixKind); 4] {
+        [
+            (2, LocalMatrixKind::Pascal8),
+            (4, LocalMatrixKind::Pascal8),
+            (8, LocalMatrixKind::Pascal8),
+            (8, LocalMatrixKind::Add37),
+        ]
+    }
     fn checks<F: SampleBase, T: p3_field::ExtensionField<F>>() {
-        for r in [2usize, 4, 8] {
-            let h = LocalMatrix::<F>::new(r);
+        for (r, kind) in cases() {
+            let h = LocalMatrix::<F>::new_with_kind(r, kind);
             let mut rng = stream(&[7; 32], b"matrix-test", 0);
             let d: Vec<F> = (0..r - 1)
                 .map(|_| crate::sampling::nonzero(&mut rng))
@@ -218,8 +311,12 @@ mod tests {
         d
     }
     fn all_minors<F: Field>() {
-        for r in [2usize, 4, 8] {
-            let h = LocalMatrix::<F>::new(r);
+        for (r, kind) in cases() {
+            let h = LocalMatrix::<F>::new_with_kind(r, kind);
+            if kind == LocalMatrixKind::Add37 {
+                assert_eq!(determinant(h.matrix.clone(), 8), F::from_usize(962));
+                assert_eq!(h.matrix, ADD37_MATRIX.map(F::from_usize));
+            }
             let mut count = 0;
             for rm in 1usize..1 << r {
                 for cm in 1usize..1 << r {
@@ -245,6 +342,14 @@ mod tests {
                 assert_eq!(count, 12869);
             }
         }
+    }
+    #[test]
+    fn add37_gate_count_and_indices() {
+        assert_eq!(ADD37_GATES.len(), 37);
+        for (i, &(a, b)) in ADD37_GATES.iter().enumerate() {
+            assert!(a < 8 + i && b < 8 + i);
+        }
+        assert!(ADD37_OUTPUTS.iter().all(|&i| i < 45));
     }
     #[test]
     fn all_square_minors_nonzero_both_fields() {

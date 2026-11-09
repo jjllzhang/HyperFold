@@ -215,6 +215,7 @@ impl<F: Field, E: Field + Algebra<F>> p3_matrix::Matrix<E> for RecoveredFirstMat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix_h::LocalMatrixKind;
     use crate::{
         field_m127::{M127Quad, Mersenne127},
         params::BaseCodeKind,
@@ -222,6 +223,14 @@ mod tests {
     };
     use p3_field::extension::CubicTrinomialExtensionField;
     use p3_goldilocks::Goldilocks;
+    fn matrix_cases() -> [(usize, LocalMatrixKind); 4] {
+        [
+            (2, LocalMatrixKind::Pascal8),
+            (4, LocalMatrixKind::Pascal8),
+            (8, LocalMatrixKind::Pascal8),
+            (8, LocalMatrixKind::Add37),
+        ]
+    }
     #[test]
     fn recovered_first_rows_match_dense_and_only_queries_are_read() {
         use p3_field::ExtensionField;
@@ -229,7 +238,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         fn check<F: SampleBase, E: ExtensionField<F>>() {
             let mut rng = stream(&[93; 32], b"query-row-reference", 0);
-            for r in [2usize, 4, 8] {
+            for (r, local_kind) in matrix_cases() {
                 for c in [2, 4] {
                     for depth in [2, 3, 4] {
                         for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
@@ -244,7 +253,7 @@ mod tests {
                             )
                             .unwrap();
                             let base = BaseCodeImpl::new(config, &[44; 32]).unwrap();
-                            let h = LocalMatrix::new(r);
+                            let h = LocalMatrix::new_with_kind(r, local_kind);
                             let diags = DiagonalTables::new(config, &[44; 32]);
                             let msg: Vec<F> =
                                 (0..config.k()).map(|_| F::sample(&mut rng)).collect();
@@ -369,14 +378,14 @@ mod tests {
     }
     fn check<F: SampleBase, E: p3_field::ExtensionField<F>>() {
         let mut rng = stream(&[1; 32], b"fold-test", 0);
-        for r in [2usize, 4, 8] {
+        for (r, local_kind) in matrix_cases() {
             for c in [2, 4] {
                 for kind in [BaseCodeKind::Rs, BaseCodeKind::Qa] {
                     let mu0 = 2;
                     let mu = mu0 + 2 * r.ilog2() as usize;
                     let config = HyperFoldConfig::testing(F::KIND, kind, mu, mu0, r, c, 3).unwrap();
                     let diags = DiagonalTables::new(config, &[9; 32]);
-                    let h = LocalMatrix::new(r);
+                    let h = LocalMatrix::new_with_kind(r, local_kind);
                     let base = BaseCodeImpl::new(config, &[4; 32]).unwrap();
                     let msg: Vec<F> = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
                     let pi = encode_top(config, &base, &h, &diags, &msg, 2);
@@ -462,9 +471,9 @@ mod tests {
     fn parallel_in_place_butterfly_matches_scalar() {
         fn check_large<F: SampleBase, E: p3_field::ExtensionField<F>>() {
             let mut rng = stream(&[63; 32], b"large-butterfly", 0);
-            for r in [2, 4, 8] {
+            for (r, local_kind) in matrix_cases() {
                 let n = 8193;
-                let h = LocalMatrix::<F>::new(r);
+                let h = LocalMatrix::<F>::new_with_kind(r, local_kind);
                 let diag: Vec<F> = (0..n * (r - 1)).map(|_| F::sample(&mut rng)).collect();
                 let original: Vec<E> = (0..n * r)
                     .map(|_| {
@@ -504,6 +513,31 @@ mod tests {
         }
         check_large::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
         check_large::<Mersenne127, M127Quad>();
+    }
+    #[test]
+    fn add37_fold_row_matches_explicit_inverse_formula() {
+        fn check<F: SampleBase, E: p3_field::ExtensionField<F>>() {
+            let h = LocalMatrix::<F>::new_with_kind(8, LocalMatrixKind::Add37);
+            let mut rng = stream(&[151; 32], b"add37-fold-reference", 0);
+            for _ in 0..12 {
+                let row: [E; 8] = core::array::from_fn(|_| {
+                    E::from_basis_coefficients_fn(|_| F::sample(&mut rng))
+                });
+                let b: [E; 8] = core::array::from_fn(|_| {
+                    E::from_basis_coefficients_fn(|_| F::sample(&mut rng))
+                });
+                let diag_inv: Vec<F> = (0..7).map(|_| crate::sampling::nonzero(&mut rng)).collect();
+                let expected: E = (0..8)
+                    .map(|i| {
+                        let inverse_row: E = (0..8).map(|j| row[j] * h.inverse[i * 8 + j]).sum();
+                        b[i] * inverse_row * if i == 0 { F::ONE } else { diag_inv[i - 1] }
+                    })
+                    .sum();
+                assert_eq!(fold_row(&h, &diag_inv, &b, &row), expected);
+            }
+        }
+        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check::<Mersenne127, M127Quad>();
     }
     #[test]
     fn encoder_and_fold_match_naive() {

@@ -1,8 +1,9 @@
 //! One official lifecycle for every certified field/code/size selection.
 use clap::Parser;
 use hyperfold_pcs::{
-    benchmark_trial::{METRICS, TrialRecord, run_trial},
+    benchmark_trial::{METRICS, TrialRecord, run_trial_with_local_matrix},
     field_m127::{M127Quad, Mersenne127},
+    matrix_h::LocalMatrixKind,
     params::{BaseCodeKind, BaseFieldKind, CERTIFIED_CONFIGS, HyperFoldConfig},
     sampling::SampleBase,
 };
@@ -33,6 +34,9 @@ struct Args {
     backends: Vec<String>,
     #[arg(long, value_delimiter = ',', default_value = "goldilocks,m127")]
     fields: Vec<String>,
+    /// Add37 is an experimental r=8-only operator; the default is unchanged.
+    #[arg(long, default_value = "pascal8", value_parser = ["pascal8", "add37"])]
+    local_matrix: String,
     #[arg(long, default_value_t = 3)]
     repetitions: usize,
     #[arg(long, default_value_t = 1)]
@@ -66,6 +70,9 @@ fn mus(input: &str) -> Result<Vec<usize>> {
 fn configs(args: &Args) -> Result<Vec<HyperFoldConfig>> {
     if args.threads != 32 || args.repetitions == 0 || args.trial_round == 0 {
         return Err("benchmark requires32threads and positive repetitions/trial-round".into());
+    }
+    if args.local_matrix == "add37" && args.r.iter().any(|&r| r != 8) {
+        return Err("Add37 requires an r=8-only selection".into());
     }
     let mus = mus(&args.mu)?;
     let fields = args
@@ -123,9 +130,10 @@ fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
         "opening_only".into(),
         "consumed_after_first_round".into(),
         "true".into(),
+        args.local_matrix.clone(),
     ]
 }
-const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
+const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial,local_matrix";
 const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes";
 fn proof_cells(r: &TrialRecord) -> Vec<String> {
     vec![
@@ -176,7 +184,12 @@ fn run<F: SampleBase, E: ExtensionField<F>>(
     let mut samples = Vec::with_capacity(args.repetitions);
     let mut last = None;
     for repetition in 0..=args.repetitions {
-        let r = run_trial::<F, E>(c)?;
+        let kind = if args.local_matrix == "add37" {
+            LocalMatrixKind::Add37
+        } else {
+            LocalMatrixKind::Pascal8
+        };
+        let r = run_trial_with_local_matrix::<F, E>(c, kind)?;
         if repetition == 0 {
             continue;
         }
@@ -259,6 +272,14 @@ mod tests {
         }
         let args = Args::try_parse_from(["bench", "--list", "--threads", "1"]).unwrap();
         assert!(configs(&args).is_err());
+        let args = Args::try_parse_from(["bench", "--list", "--local-matrix", "add37", "--r", "8"])
+            .unwrap();
+        let cases = configs(&args).unwrap();
+        assert_eq!(cases.len(), 48);
+        assert_eq!(identity(cases[0], &args).last().unwrap(), "add37");
+        let args = Args::try_parse_from(["bench", "--list", "--local-matrix", "add37"]).unwrap();
+        assert!(configs(&args).is_err());
+        assert!(Args::try_parse_from(["bench", "--list", "--local-matrix", "unknown"]).is_err());
     }
     #[test]
     fn old_outputs_are_unchanged() {
