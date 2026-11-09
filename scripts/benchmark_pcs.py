@@ -166,7 +166,7 @@ def read_round(path, job, round_number, repetitions):
             raise ValueError("unexpected benchmark case or schema")
         for key in ("mu0", "depth", "extension_degree", "queries", "threads",
                     "first_tree_strategy", "parameter_lifecycle", "witness_lifecycle",
-                    "setup_per_trial"):
+                    "setup_per_trial", "local_matrix"):
             if key in job and row.get(key) != job[key]:
                 raise ValueError(f"unexpected benchmark identity: {key}")
     return rows
@@ -238,6 +238,8 @@ def execute(args, root, archive):
             raise ValueError(f"selection process failed: exit{code}")
         listing = (root / "selection.stdout.log").read_text()
     jobs = list(csv.DictReader(io.StringIO(listing)))
+    if any(j.get("local_matrix", "default") != "default" for j in jobs):
+        raise ValueError("public runner only supports default local_matrix")
     jobs.sort(key=lambda j: (int(j["mu"]), j["field"].lower(), int(j["r"]),
                             int(j["c"]), j["backend"].lower()))
     keys = [(j["field"].lower(), j["backend"].lower(), *config_key(j)) for j in jobs]

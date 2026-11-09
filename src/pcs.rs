@@ -4,7 +4,7 @@
 use crate::{
     base_code::{BaseCode, BaseCodeImpl},
     encoder::{RecoveredFirstMatrix, beta, encode_top, fold_level, fold_row},
-    matrix_h::LocalMatrix,
+    matrix_h::{LocalMatrix, LocalMatrixKind},
     merkle_commitment::{self, Digest, Opening, Tree},
     params::{DiagonalTables, Error, HyperFoldConfig, Result},
     sampling::SampleBase,
@@ -247,7 +247,19 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
     /// Standard Setup constructs both directions once. Convert to opening-only
     /// after the final commitment to release forward allocations without inversion.
     pub fn setup(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
+        Self::setup_with_local_matrix(config, seed, LocalMatrixKind::Default)
+    }
+    /// Select a mathematical r=4 alternative or the legacy dense H4 inverse.
+    /// Dense and fast H4 have the same parameter identity and proof bytes.
+    pub fn setup_with_local_matrix(
+        config: HyperFoldConfig,
+        seed: [u8; 32],
+        kind: LocalMatrixKind,
+    ) -> Result<Self> {
         config.validate()?;
+        if kind != LocalMatrixKind::Default && config.r != 4 {
+            return Err(Error::Config("explicit matrix variants require r=4"));
+        }
         if config.base_field != F::KIND
             || config.extension_degree != <E as BasedVectorSpace<F>>::DIMENSION
         {
@@ -258,9 +270,12 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         hasher.update(&config.id());
         hasher.update(&seed);
         hasher.update(&E::algebra_id());
+        if kind == LocalMatrixKind::Pascal4 {
+            hasher.update(b"local-matrix-r4:pascal4-v1");
+        }
         let id = *hasher.finalize().as_bytes();
         let base = BaseCodeImpl::new(config, &seed)?;
-        let h = LocalMatrix::new(config.r);
+        let h = LocalMatrix::new_with_kind(config.r, kind);
         let diagonals = DiagonalTables::new(config, &seed);
         Ok(Self {
             config,

@@ -510,4 +510,84 @@ mod tests {
         check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
         check::<Mersenne127, M127Quad>();
     }
+    #[test]
+    fn r4_variants_fold_formula_encoding_and_recovered_rows() {
+        fn run<F: SampleBase, E: p3_field::ExtensionField<F>>() {
+            use crate::matrix_h::LocalMatrixKind;
+            use p3_matrix::Matrix;
+            let mut rng = stream(&[149; 32], b"r4-fold-variants", 0);
+            for kind in [
+                LocalMatrixKind::Default,
+                LocalMatrixKind::H4Dense,
+                LocalMatrixKind::Pascal4,
+            ] {
+                for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                    for c in [2, 4] {
+                        for depth in [2, 3, 4] {
+                            let cfg = HyperFoldConfig::testing(
+                                F::KIND,
+                                backend,
+                                2 + 2 * depth,
+                                2,
+                                4,
+                                c,
+                                E::DIMENSION,
+                            )
+                            .unwrap();
+                            let h = LocalMatrix::<F>::new_with_kind(4, kind);
+                            let base = BaseCodeImpl::new(cfg, &[148; 32]).unwrap();
+                            let diags = DiagonalTables::new(cfg, &[147; 32]);
+                            let msg: Vec<F> = (0..cfg.k()).map(|_| F::sample(&mut rng)).collect();
+                            let top = encode_top(cfg, &base, &h, &diags, &msg, depth);
+                            let alphas: Vec<E> = (0..cfg.nu())
+                                .map(|_| E::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                                .collect();
+                            let b = beta(&alphas);
+                            let folded = fold_level(cfg, &h, &diags, &top, depth, &b);
+                            let kp = cfg.k() / 4;
+                            let fm: Vec<E> = (0..kp)
+                                .map(|j| (0..4).map(|a| b[a] * msg[a * kp + j]).sum())
+                                .collect();
+                            let expected = encode_top(cfg, &base, &h, &diags, &fm, depth - 1);
+                            assert_eq!(folded.values, expected.values);
+                            let natural = logical(&folded, 4);
+                            for (j, &actual) in natural.iter().enumerate() {
+                                let restored: [F; 4] = core::array::from_fn(|a| {
+                                    let v: F = (0..4)
+                                        .map(|k| h.inverse[a * 4 + k] * top.values[j * 4 + k])
+                                        .sum();
+                                    v * if a == 0 {
+                                        F::ONE
+                                    } else {
+                                        diags.levels[depth - 1].inverse[j * 3 + a - 1]
+                                    }
+                                });
+                                let scalar: E = (0..4).map(|a| b[a] * restored[a]).sum();
+                                assert_eq!(
+                                    actual, scalar,
+                                    "kind={kind:?},depth={depth},natural index={j}"
+                                );
+                            }
+                            let lazy = RecoveredFirstMatrix::new(
+                                cfg,
+                                &top,
+                                &h,
+                                &diags.levels[depth - 1].inverse,
+                                b,
+                            );
+                            assert_eq!(lazy.height(), folded.height());
+                            for j in 0..folded.height() {
+                                assert_eq!(
+                                    lazy.row(j).unwrap().into_iter().collect::<Vec<_>>(),
+                                    folded.row(j).unwrap().into_iter().collect::<Vec<_>>()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        run::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        run::<Mersenne127, M127Quad>();
+    }
 }

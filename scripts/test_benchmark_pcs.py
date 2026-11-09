@@ -478,6 +478,14 @@ sys.exit(7 if fail else 0)
         with self.assertRaisesRegex(ValueError, "threads"):
             bench.read_round(raw, job, 1, 2)
 
+    def test_local_matrix_identity_cannot_be_silently_mislabeled(self):
+        self.run_quiet(fields="m127", backends="qa", raw_dir=self.root / "archive")
+        raw = self.root / "archive/case-0-round-1.raw.csv"
+        job = dict(schema_version=bench.SCHEMA, field="M127", backend="Qa",
+                   mu="20", r="2", c="4", local_matrix="pascal4")
+        with self.assertRaisesRegex(ValueError, "local_matrix"):
+            bench.read_round(raw, job, 1, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

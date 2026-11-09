@@ -1,8 +1,9 @@
 //! One official lifecycle for every certified field/code/size selection.
 use clap::Parser;
 use hyperfold_pcs::{
-    benchmark_trial::{METRICS, TrialRecord, run_trial},
+    benchmark_trial::{METRICS, TrialRecord, run_trial_with_local_matrix},
     field_m127::{M127Quad, Mersenne127},
+    matrix_h::LocalMatrixKind,
     params::{BaseCodeKind, BaseFieldKind, CERTIFIED_CONFIGS, HyperFoldConfig},
     sampling::SampleBase,
 };
@@ -23,6 +24,9 @@ const SCHEMA: &str = "hyperfold-pcs-bench-v2";
 struct Args {
     #[arg(long, default_value_t = 32)]
     threads: usize,
+    /// Default H4 fast inverse, legacy dense H4, or an experimental Pascal4.
+    #[arg(long, default_value = "default", value_parser = ["default", "h4-dense", "pascal4"])]
+    local_matrix: String,
     #[arg(long, default_value = "20..=30")]
     mu: String,
     #[arg(long, value_delimiter = ',', default_value = "2,4,8")]
@@ -63,9 +67,20 @@ fn mus(input: &str) -> Result<Vec<usize>> {
     }
     Ok(v)
 }
+fn matrix_kind(args: &Args) -> LocalMatrixKind {
+    match args.local_matrix.as_str() {
+        "default" => LocalMatrixKind::Default,
+        "h4-dense" => LocalMatrixKind::H4Dense,
+        "pascal4" => LocalMatrixKind::Pascal4,
+        _ => unreachable!("validated by clap"),
+    }
+}
 fn configs(args: &Args) -> Result<Vec<HyperFoldConfig>> {
     if args.threads != 32 || args.repetitions == 0 || args.trial_round == 0 {
         return Err("benchmark requires32threads and positive repetitions/trial-round".into());
+    }
+    if matrix_kind(args) != LocalMatrixKind::Default && args.r != [4] {
+        return Err("non-default local matrix requires --r 4".into());
     }
     let mus = mus(&args.mu)?;
     let fields = args
@@ -123,9 +138,10 @@ fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
         "opening_only".into(),
         "consumed_after_first_round".into(),
         "true".into(),
+        matrix_kind(args).label().into(),
     ]
 }
-const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
+const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial,local_matrix";
 const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes";
 fn proof_cells(r: &TrialRecord) -> Vec<String> {
     vec![
@@ -176,7 +192,7 @@ fn run<F: SampleBase, E: ExtensionField<F>>(
     let mut samples = Vec::with_capacity(args.repetitions);
     let mut last = None;
     for repetition in 0..=args.repetitions {
-        let r = run_trial::<F, E>(c)?;
+        let r = run_trial_with_local_matrix::<F, E>(c, matrix_kind(args))?;
         if repetition == 0 {
             continue;
         }
@@ -259,6 +275,31 @@ mod tests {
         }
         let args = Args::try_parse_from(["bench", "--list", "--threads", "1"]).unwrap();
         assert!(configs(&args).is_err());
+    }
+    #[test]
+    fn local_matrix_selection_and_native_identity() {
+        for label in ["default", "h4-dense", "pascal4"] {
+            let a = Args::try_parse_from(["bench", "--list", "--r", "4", "--local-matrix", label])
+                .unwrap();
+            let rows = configs(&a).unwrap();
+            assert_eq!(rows.len(), 48);
+            for row in rows {
+                assert_eq!(identity(row, &a).last().unwrap(), label);
+            }
+        }
+        for arity in ["2", "8", "2,4", "4,8"] {
+            let a = Args::try_parse_from([
+                "bench",
+                "--list",
+                "--r",
+                arity,
+                "--local-matrix",
+                "pascal4",
+            ])
+            .unwrap();
+            assert!(configs(&a).is_err());
+        }
+        assert!(Args::try_parse_from(["bench", "--list", "--local-matrix", "unknown"]).is_err());
     }
     #[test]
     fn old_outputs_are_unchanged() {
