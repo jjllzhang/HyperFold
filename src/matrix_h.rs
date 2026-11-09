@@ -4,7 +4,6 @@ use p3_field::{Algebra, Field};
 pub struct LocalMatrix<F> {
     pub r: usize,
     pub matrix: Vec<F>,
-    pub inverse: Vec<F>,
 }
 fn binom(n: usize, k: usize) -> usize {
     if k > n {
@@ -26,8 +25,7 @@ impl<F: Field> LocalMatrix<F> {
                 .flat_map(|i| (0..r).map(move |j| F::from_usize(binom(i + j, i))))
                 .collect()
         };
-        let inverse = invert(&matrix, r);
-        Self { r, matrix, inverse }
+        Self { r, matrix }
     }
     pub fn forward<T: Field + Algebra<F>>(&self, x: &mut [T; 8], diag: &[F]) {
         for a in 1..self.r {
@@ -69,18 +67,29 @@ impl<F: Field> LocalMatrix<F> {
                 pascal_lower(x, true);
                 pascal_upper(x, true);
             }
-            4 => {
-                let old = *x;
-                for (i, v) in x.iter_mut().enumerate().take(4) {
-                    *v = (0..4).map(|j| old[j] * self.inverse[i * 4 + j]).sum();
-                }
-            }
+            4 => h4_inverse(x),
             _ => unreachable!(),
         }
         for a in 1..self.r {
             x[a] *= diag_inv[a - 1];
         }
     }
+}
+// Eleven binary additions/subtractions and two exact halvings. This returns
+// M^-1 y, not 2 M^-1 y: callers retain their original challenge weights.
+#[inline]
+fn h4_inverse<T: Field>(x: &mut [T; 8]) {
+    let a = x[1] - x[2];
+    let b = x[3] - x[0];
+    let q = x[0] - a;
+    let h = q.halve();
+    let b3 = (b + b) + b;
+    let t = (x[2] + q) - b3;
+    let x2 = t.halve();
+    let x0 = (x2 + b) - a;
+    let x1 = h - x0;
+    let x3 = b - h;
+    x[..4].copy_from_slice(&[x0, x1, x2, x3]);
 }
 fn pascal_lower<T: Field>(x: &mut [T; 8], inverse: bool) {
     if inverse {
@@ -112,7 +121,8 @@ fn pascal_upper<T: Field>(x: &mut [T; 8], inverse: bool) {
         }
     }
 }
-fn invert<F: Field>(a: &[F], n: usize) -> Vec<F> {
+#[cfg(test)]
+pub(crate) fn invert<F: Field>(a: &[F], n: usize) -> Vec<F> {
     let mut a = a.to_vec();
     let mut inv = vec![F::ZERO; n * n];
     for i in 0..n {
@@ -191,6 +201,67 @@ mod tests {
         checks::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
         checks::<Mersenne127, Mersenne127>();
         checks::<Mersenne127, M127Quad>();
+    }
+    fn r4_reference<F: SampleBase, T: p3_field::ExtensionField<F>>() {
+        let mut rng = stream(&[157; 32], b"r4-reference", 0);
+        let h = LocalMatrix::<F>::new(4);
+        assert_eq!(
+            h.matrix,
+            [2usize, 3, 1, 1, 1, 2, 3, 4, 1, 1, 2, 3, 3, 4, 1, 2].map(F::from_usize)
+        );
+        let inverse = invert(&h.matrix, 4);
+        let half = F::TWO.inverse();
+        let twice_inverse = [2i64, -3, 4, -1, -1, 2, -3, 1, 4, -1, 2, -3, -3, 1, -1, 2];
+        let expected: Vec<F> = twice_inverse
+            .iter()
+            .map(|&v| {
+                let a = F::from_usize(v.unsigned_abs() as usize) * half;
+                if v < 0 { -a } else { a }
+            })
+            .collect();
+        assert_eq!(inverse, expected);
+        for trial in 0..128 {
+            let input: [T; 8] =
+                core::array::from_fn(|_| T::from_basis_coefficients_fn(|_| F::sample(&mut rng)));
+            let input = match trial {
+                0 => [T::ZERO; 8],
+                1 => [T::ONE; 8],
+                2 => [-T::ONE; 8],
+                _ => input,
+            };
+            let d: Vec<F> = (0..3).map(|_| crate::sampling::nonzero(&mut rng)).collect();
+            let di: Vec<F> = d.iter().map(Field::inverse).collect();
+            let mut fast = input;
+            let mut naive = input;
+            h.unscale_inverse(&mut fast, &di);
+            for i in 0..4 {
+                naive[i] = (0..4).map(|j| input[j] * inverse[i * 4 + j]).sum();
+                if i > 0 {
+                    naive[i] *= di[i - 1];
+                }
+            }
+            assert_eq!(fast, naive); // arbitrary input, not merely an encoder image
+            let mut image = input;
+            h.forward(&mut image, &d);
+            for (i, &actual) in image.iter().enumerate().take(4) {
+                let expected: T = (0..4)
+                    .map(|j| {
+                        input[j] * h.matrix[i * 4 + j] * if j == 0 { F::ONE } else { d[j - 1] }
+                    })
+                    .sum();
+                assert_eq!(actual, expected);
+            }
+            assert_eq!(&image[4..], &input[4..]);
+            h.unscale_inverse(&mut image, &di);
+            assert_eq!(image, input);
+        }
+    }
+    #[test]
+    fn r4_fast_matches_literal_and_arbitrary_inverse_four_types() {
+        r4_reference::<Goldilocks, Goldilocks>();
+        r4_reference::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        r4_reference::<Mersenne127, Mersenne127>();
+        r4_reference::<Mersenne127, M127Quad>();
     }
     fn determinant<F: Field>(mut a: Vec<F>, n: usize) -> F {
         let mut d = F::ONE;
