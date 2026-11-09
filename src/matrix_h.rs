@@ -20,6 +20,7 @@ const ADD37_MATRIX: [usize; 64] = [
     31, 17, 41, 72, 65, 59, 23, 33, 6, 8, 32, 43, 56, 41, 5, 7, 10, 5, 6, 12, 9, 8, 6, 12, 5, 3,
     13, 21, 20, 18, 5, 19, 13, 8, 17, 28, 28, 23, 9,
 ];
+#[cfg(test)]
 const ADD37_GATES: [(usize, usize); 37] = [
     (6, 4),
     (3, 8),
@@ -59,6 +60,7 @@ const ADD37_GATES: [(usize, usize); 37] = [
     (16, 37),
     (43, 32),
 ];
+#[cfg(test)]
 const ADD37_OUTPUTS: [usize; 8] = [33, 31, 40, 42, 35, 43, 38, 44];
 #[derive(Debug)]
 pub struct LocalMatrix<F> {
@@ -124,16 +126,7 @@ impl<F: Field> LocalMatrix<F> {
                 x[2] = w2;
                 x[3] = w0 + t013;
             }
-            8 if self.kind == LocalMatrixKind::Add37 => {
-                let mut v = [T::ZERO; 45];
-                v[..8].copy_from_slice(x);
-                for (i, &(a, b)) in ADD37_GATES.iter().enumerate() {
-                    v[i + 8] = v[a] + v[b];
-                }
-                for (dst, src) in x.iter_mut().zip(ADD37_OUTPUTS) {
-                    *dst = v[src];
-                }
-            }
+            8 if self.kind == LocalMatrixKind::Add37 => add37_forward(x),
             8 => {
                 pascal_upper(x, false);
                 pascal_lower(x, false);
@@ -152,12 +145,16 @@ impl<F: Field> LocalMatrix<F> {
                 pascal_lower(x, true);
                 pascal_upper(x, true);
             }
-            4 | 8 => {
+            4 => {
                 let old = *x;
-                for (i, v) in x.iter_mut().enumerate().take(self.r) {
-                    *v = (0..self.r)
-                        .map(|j| old[j] * self.inverse[i * self.r + j])
-                        .sum();
+                for (i, v) in x.iter_mut().enumerate().take(4) {
+                    *v = (0..4).map(|j| old[j] * self.inverse[i * 4 + j]).sum();
+                }
+            }
+            8 => {
+                let old = *x;
+                for (i, v) in x.iter_mut().enumerate() {
+                    *v = (0..8).map(|j| old[j] * self.inverse[i * 8 + j]).sum();
                 }
             }
             _ => unreachable!(),
@@ -166,6 +163,49 @@ impl<F: Field> LocalMatrix<F> {
             x[a] *= diag_inv[a - 1];
         }
     }
+}
+// The literal gate table is test-only; production is straight-line to avoid
+// indexed interpretation, 45-element zeroing and gate-loop bounds checks.
+#[inline]
+fn add37_forward<T: Field>(x: &mut [T; 8]) {
+    let t8 = x[6] + x[4];
+    let t9 = x[3] + t8;
+    let t10 = t9 + x[5];
+    let t11 = x[7] + t8;
+    let t12 = x[5] + x[0];
+    let t13 = x[2] + t12;
+    let t14 = t12 + t10;
+    let t15 = t14 + t14;
+    let t16 = t13 + t15;
+    let t17 = t16 + t15;
+    let t18 = x[1] + t11;
+    let t19 = t8 + t17;
+    let t20 = t19 + t9;
+    let t21 = t20 + t20;
+    let t22 = t18 + x[4];
+    let t23 = t22 + x[3];
+    let t24 = t10 + t23;
+    let t25 = t23 + x[1];
+    let t26 = t25 + t13;
+    let t27 = t18 + t26;
+    let t28 = t21 + t27;
+    let t29 = t28 + t21;
+    let t30 = t28 + t11;
+    let t31 = t29 + t24;
+    let t32 = t30 + x[0];
+    let t33 = t29 + t17;
+    let t34 = t22 + t32;
+    let t35 = t29 + t32;
+    let t36 = t26 + t27;
+    let t37 = t36 + t36;
+    let t38 = t34 + t24;
+    let t39 = t34 + t37;
+    let t40 = t25 + t39;
+    let t41 = t30 + t39;
+    let t42 = t39 + t41;
+    let t43 = t16 + t37;
+    let t44 = t43 + t32;
+    *x = [t33, t31, t40, t42, t35, t43, t38, t44];
 }
 fn pascal_lower<T: Field>(x: &mut [T; 8], inverse: bool) {
     if inverse {
@@ -342,6 +382,24 @@ mod tests {
                 assert_eq!(count, 12869);
             }
         }
+    }
+    #[test]
+    fn add37_straight_line_matches_gate_interpreter() {
+        fn check<F: SampleBase>() {
+            let mut rng = stream(&[152; 32], b"add37-gates", 0);
+            for _ in 0..24 {
+                let mut x: [F; 8] = core::array::from_fn(|_| F::sample(&mut rng));
+                let mut v = [F::ZERO; 45];
+                v[..8].copy_from_slice(&x);
+                for (i, &(a, b)) in ADD37_GATES.iter().enumerate() {
+                    v[i + 8] = v[a] + v[b];
+                }
+                add37_forward(&mut x);
+                assert_eq!(x, ADD37_OUTPUTS.map(|j| v[j]));
+            }
+        }
+        check::<Goldilocks>();
+        check::<Mersenne127>();
     }
     #[test]
     fn add37_gate_count_and_indices() {
