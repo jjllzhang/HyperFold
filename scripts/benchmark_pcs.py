@@ -74,12 +74,10 @@ def utc_now():
 
 
 def event(root, kind, **fields):
-    """Append and sync before launch; a missing terminal event means unknown."""
+    """Append an archive record when persistent evidence is requested."""
     if root is not None:
         with (root / "events.jsonl").open("a") as stream:
             stream.write(json.dumps(dict(event=kind, utc=utc_now(), **fields)) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
 
 
 def memory_snapshot():
@@ -110,43 +108,20 @@ def reap_group(proc):
             pass
 
 
-def run_process(command, *, archive=None, prefix=None, identity=None):
-    """Persist launch intent before Popen; always reap after wait/error/interrupt."""
-    proc = None
-    outcome = "unknown"
-    error = None
-    code = None
+def run_process(command, *, root, archive, prefix, stdout_name=None):
+    """Capture process evidence and always clean up its session."""
     with ExitStack() as stack:
-        logs = {}
-        if archive is not None:
-            for name in ("stdout", "stderr"):
-                path = archive / f"{prefix}.{name}.log"
-                logs[name] = stack.enter_context(path.open("x"))
-        event(archive, "process_start", command=command, identity=identity,
-              prefix=prefix, pid=None, pgid=None, status="launching",
-              affinity=sorted(os.sched_getaffinity(0)), memory=memory_snapshot())
+        stdout = stack.enter_context((root / (stdout_name or f"{prefix}.stdout.log")).open("x"))
+        stderr = stack.enter_context((root / f"{prefix}.stderr.log").open("x"))
+        event(archive, "process_start", prefix=prefix, command=command)
+        proc = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
+        code = None
         try:
-            proc = subprocess.Popen(command, start_new_session=True, **logs)
-            event(archive, "process_started", prefix=prefix, pid=proc.pid,
-                  pgid=proc.pid, status="running")
             code = proc.wait()
-            outcome = "exited" if code is not None else "unknown"
-            return code
-        except BaseException as exc:
-            outcome = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
-            error = repr(exc)
-            raise
         finally:
-            try:
-                if proc is not None:
-                    reap_group(proc)
-            finally:
-                event(archive, "process_end", prefix=prefix,
-                      pid=None if proc is None else proc.pid,
-                      pgid=None if proc is None else proc.pid,
-                      status=outcome, returncode=code,
-                      reaped_returncode=None if proc is None else proc.returncode,
-                      error=error, memory=memory_snapshot())
+            reap_group(proc)
+            event(archive, "process_end", prefix=prefix, returncode=code)
+        return code
 
 
 def read_round(path, job, round_number, repetitions):
@@ -229,76 +204,45 @@ def execute(args, root, archive):
         "--threads", "32", "--fields", args.fields, "--backends", args.backends,
         "--mu", args.mu, "--r", args.r, "--c", args.c,
     ]
-    if archive is None:
-        listing = subprocess.check_output([str(binary), "--list", *selection], text=True)
-    else:
-        code = run_process([str(binary), "--list", *selection], archive=archive,
-                           prefix="selection", identity={"role": "list_only"})
-        if code != 0:
-            raise ValueError(f"selection process failed: exit{code}")
-        listing = (root / "selection.stdout.log").read_text()
+    code = run_process([str(binary), "--list", *selection], root=root,
+                       archive=archive, prefix="selection", stdout_name="selection.csv")
+    if code != 0:
+        raise ValueError(f"selection process failed: exit{code}")
+    listing = (root / "selection.csv").read_text()
     jobs = list(csv.DictReader(io.StringIO(listing)))
     jobs.sort(key=lambda j: (int(j["mu"]), j["field"].lower(), int(j["r"]),
                             int(j["c"]), j["backend"].lower()))
     keys = [(j["field"].lower(), j["backend"].lower(), *config_key(j)) for j in jobs]
     if not jobs or len(set(keys)) != len(jobs):
         raise ValueError("empty or duplicate configuration selection")
-    if archive is not None:
-        with (root / "selection.csv").open("x", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(jobs[0]))
-            writer.writeheader()
-            writer.writerows(jobs)
     failed = False
     for index, job in enumerate(jobs):
         path = result_path(args.output_dir, job)
         samples = []
-        event(archive, "case_start", index=index, config=job)
-        try:
-            for round_number in range(1, args.rounds + 1):
-                prefix = f"case-{index}-round-{round_number}"
-                output = root / f"{prefix}.csv"
-                command = [
-                    str(binary), "--fields", job["field"].lower(),
-                    "--backends", job["backend"].lower(), "--mu", job["mu"],
-                    "--r", job["r"], "--c", job["c"], "--threads", "32",
-                    "--trial-round", str(round_number),
-                    "--repetitions", str(args.repetitions), "--output", str(output),
-                ]
-                if archive is None:
-                    code = run_process(command)
-                else:
-                    code = run_process(command, archive=archive, prefix=prefix,
-                                       identity=dict(index=index, config=job,
-                                                     round=round_number,
-                                                     repetitions=args.repetitions))
-                if code != 0:
-                    event(archive, "case_end", index=index,
-                          status="unknown" if code is None else "failed",
-                          returncode=code, round=round_number)
-                    print(f"benchmark failed: {path.name} {config_key(job)}, "
-                          f"round{round_number}, exit{code}", file=sys.stderr)
-                    failed = True
-                    break
-                current = read_round(output.with_suffix(".raw.csv"), job,
-                                     round_number, args.repetitions)
-                samples.extend(current)
-                event(archive, "round_validated", index=index, round=round_number,
-                      samples=len(current), raw=output.with_suffix(".raw.csv").name)
-            else:
-                result = batch_result(job, samples)
-                event(archive, "case_validated", index=index, result=result,
-                      samples=len(samples))
-                if args.role == "protocol_performance":
-                    update_result(path, result)
-                    print(f"updated {path.name}: {config_key(job)}", flush=True)
-                event(archive, "case_end", index=index, status="complete",
-                      table_written=args.role == "protocol_performance")
-                continue
-        except BaseException as error:
-            event(archive, "case_end", index=index,
-                  status="interrupted" if isinstance(error, KeyboardInterrupt) else "error",
-                  error=repr(error))
-            raise
+        for round_number in range(1, args.rounds + 1):
+            prefix = f"case-{index}-round-{round_number}"
+            output = root / f"{prefix}.raw.csv"
+            command = [
+                str(binary), "--fields", job["field"].lower(),
+                "--backends", job["backend"].lower(), "--mu", job["mu"],
+                "--r", job["r"], "--c", job["c"], "--threads", "32",
+                "--trial-round", str(round_number),
+                "--repetitions", str(args.repetitions), "--output", str(output),
+            ]
+            code = run_process(command, root=root, archive=archive, prefix=prefix)
+            if code != 0:
+                print(f"benchmark failed: {path.name} {config_key(job)}, "
+                      f"round{round_number}, exit{code}", file=sys.stderr)
+                failed = True
+                break
+            samples.extend(read_round(output, job,
+                                      round_number, args.repetitions))
+        else:
+            result = batch_result(job, samples)
+            if args.role == "protocol_performance":
+                update_result(path, result)
+                print(f"updated {path.name}: {config_key(job)}", flush=True)
+            continue
         if not args.continue_on_failure:
             break
     return 1 if failed else 0
@@ -318,17 +262,7 @@ def run(args):
             root = provided.resolve()
             root.mkdir(parents=True, exist_ok=False)
             archive = root
-        event(archive, "run_start", runner_pid=os.getpid(), status="started")
-        try:
-            code = execute(args, root, archive)
-        except BaseException as error:
-            event(archive, "run_end",
-                  status="interrupted" if isinstance(error, KeyboardInterrupt) else "error",
-                  returncode=None, error=repr(error))
-            raise
-        event(archive, "run_end", status="complete" if code == 0 else "failed",
-              returncode=code)
-        return code
+        return execute(args, root, archive)
 
 
 def main():
@@ -366,7 +300,7 @@ def main():
     except KeyboardInterrupt:
         print("benchmark interrupted", file=sys.stderr)
         return 130
-    except Exception as error:
+    except (OSError, ValueError) as error:
         print(f"benchmark error: {error}", file=sys.stderr)
         return 1
 

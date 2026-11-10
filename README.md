@@ -19,7 +19,6 @@ This is experimental research software, not an audited or production-ready crypt
 | `src/field_m127.rs` | M127 arithmetic and its quadratic extension |
 | `src/{params,certified_params}.rs` | Certified configurations and parameter validation |
 | `src/{bin/bench,benchmark_trial}.rs` | Native benchmark CLI and the shared fresh-Setup trial lifecycle |
-| `benches/pcs.rs` | Criterion harness, separate from the four-table measurement workflow |
 | `tests/pcs.rs` | PCS regression tests, including the consolidated golden module |
 | `tests/fixtures/native-retained-golden.csv` | Fixed transcript/proof fingerprints |
 | `scripts/` | Dependency configuration, parameter import, benchmark orchestration and plotting |
@@ -105,7 +104,9 @@ python3 scripts/benchmark_pcs.py \
   --raw-dir ../hyperfold-raw-one
 ```
 
-**Choose fresh output locations. Do not create `--raw-dir` beforehand:** it must be absent. Raw evidence includes the copied executable and its SHA-256, selection, sample CSVs, process logs and event records. Keep a separate record of the source revision, build command, toolchain and host; the executable hash alone does not identify its build provenance.
+**Choose fresh output locations. Do not create `--raw-dir` beforehand:** it must be absent. Raw evidence includes the copied executable and its SHA-256, the selection process's unmodified stdout in `selection.csv`, its stderr in `selection.stderr.log`, sample CSVs, process logs, and command/exit records in `events.jsonl`. The selection stdout is retained even if the process fails; it is not duplicated in a stdout log. A start without an end, or a null return code, is not a successful run; records are not fsync-synchronized and can be incomplete after a crash. Keep a separate record of the source revision, build command, toolchain and host; the executable hash alone does not identify its build provenance.
+
+The Rust CLI's `--output PATH` now writes only raw sample rows directly to the new `PATH` (no summary or companion file); existing paths are rejected. The Python runner validates complete samples and computes the result means and proof size. This changes the direct CLI output interface, not the sample schema or measurement lifecycle.
 
 `--output-dir` defaults to the bundled `results/` directory and replaces matching rows while retaining other existing rows. Always specify a separate directory for new measurements. Reusing a result directory can mix experiment batches even though the raw directory is new.
 
@@ -151,7 +152,7 @@ python3 scripts/plot_results.py \
   --input-dir results --output-dir ../hyperfold-figures-new
 ```
 
-The script validates all four complete grids and writes **four PNGs and four PDFs**. It plots time in ms and proof size in **KiB** (`bytes / 1024`). A single-configuration result directory is not a complete plotting input. `--output-dir` defaults to the bundled `figures/`, so use an alternate directory to keep the shipped plots unchanged.
+The script validates all four complete grids and writes **four PNGs and four PDFs**. It uses the DejaVu Serif font (normally bundled with Matplotlib) and configures PDF TrueType fonts (`pdf.fonttype = 42`); ensure the font is available for consistent rendering. It plots time in ms and proof size in **KiB** (`bytes / 1024`). A single-configuration result directory is not a complete plotting input. `--output-dir` defaults to the bundled `figures/`, so use an alternate directory to keep the shipped plots unchanged.
 
 | Field | `c=2` | `c=4` |
 |---|---|---|
