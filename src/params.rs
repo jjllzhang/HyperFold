@@ -4,7 +4,9 @@ use crate::sampling::{SampleBase, nonzero, stream};
 use p3_field::batch_multiplicative_inverse;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-pub const CERTIFICATE_VERSION: &str = "hfc-tight-total100-gold-m127-v3-2026-11-05";
+pub const CERTIFICATE_VERSION: &str = "hfc-tight-total100-gold-m127-v4-dual-2026-11-10";
+// Preserve the original golden-reference domain for non-certified configurations.
+const LEGACY_UNCERTIFIED_VERSION: &str = "hfc-tight-total100-gold-m127-v3-2026-11-05";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum BaseFieldKind {
     Goldilocks,
@@ -126,7 +128,12 @@ impl HyperFoldConfig {
     }
     pub fn id(self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
-        h.update(CERTIFICATE_VERSION.as_bytes());
+        let version = if self.certified {
+            CERTIFICATE_VERSION
+        } else {
+            LEGACY_UNCERTIFIED_VERSION
+        };
+        h.update(version.as_bytes());
         h.update(&postcard::to_allocvec(&self).expect("fixed config serialization"));
         *h.finalize().as_bytes()
     }
