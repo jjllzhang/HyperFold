@@ -127,7 +127,7 @@ With `--rounds 1`, the three measured trials are **repetitions within one proces
 
 ## Recorded results
 
-The four bundled CSVs each contain 36 configurations from the unified 144-configuration run, using one warmup and three same-process measured trials per configuration:
+The four bundled CSVs each contain 36 configurations; each row summarizes three measured trials, each run after a warmup:
 
 - [Goldilocks QA](results/goldilocks-qa.csv) and [Goldilocks RS](results/goldilocks-rs.csv)
 - [M127 QA](results/m127-qa.csv) and [M127 RS](results/m127-rs.csv)
