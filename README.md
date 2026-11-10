@@ -7,7 +7,7 @@ Rust research implementation of a multilinear polynomial commitment scheme with 
 
 Both backends support **Goldilocks** (`2^64 - 2^32 + 1`) with cubic extension-field challenges and **M127** (`2^127 - 1`) with quadratic extension-field challenges.
 
-This is experimental research software, not an audited or production-ready cryptographic library. The bundled v3 parameter profiles target a **100-bit IOP error budget** under their certificate assumptions. Parameter checks, tests and measurements do not establish full PCS, Fiat-Shamir, hash or zero-knowledge security.
+This is experimental research software, not an audited or production-ready cryptographic library. The bundled v4 parameter profiles target a **100-bit IOP error budget** under their certificate assumptions. Parameter checks, tests and measurements do not establish full PCS, Fiat-Shamir, hash or zero-knowledge security.
 
 ## Code layout
 
