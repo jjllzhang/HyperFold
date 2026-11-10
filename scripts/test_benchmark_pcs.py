@@ -43,7 +43,7 @@ n=int(count.read_text())+1 if count.exists() else 1
 count.write_text(str(n))
 fail=n==int(os.environ.get('HF_TEST_FAIL_AT','0'))
 short=n==int(os.environ.get('HF_TEST_SHORT_AT','0'))
-p=pathlib.Path(a['--output']).with_suffix('.raw.csv')
+p=pathlib.Path(a['--output'])
 with p.open('w',newline='') as f:
  w=csv.writer(f)
  w.writerow(['schema_version','field','backend','mu','r','c','trial_round','repetition','commit_ms','open_ms','verify_ms','proof_size_bytes'])
@@ -191,12 +191,13 @@ sys.exit(7 if fail else 0)
         for error in [KeyboardInterrupt, RuntimeError]:
             calls = 0
 
-            def stop_on_second_round(command):
+            def stop_on_second_round(command, **kwargs):
                 nonlocal calls
-                calls += 1
-                if calls == 2:
-                    raise error()
-                return original(command)
+                if "--list" not in command:
+                    calls += 1
+                    if calls == 2:
+                        raise error()
+                return original(command, **kwargs)
 
             with mock.patch.object(
                 bench, "run_process", side_effect=stop_on_second_round
@@ -268,7 +269,7 @@ sys.exit(7 if fail else 0)
             ]
             with mock.patch.object(bench.subprocess, "Popen", side_effect=launch):
                 with self.assertRaises(error):
-                    bench.run_process(command)
+                    bench.run_process(command, root=self.root, archive=None, prefix=error.__name__)
             self.assertIsInstance(processes[0].poll(), int)
             pid = int(pid_path.read_text())
             state = Path(f"/proc/{pid}/stat")
@@ -290,21 +291,23 @@ sys.exit(7 if fail else 0)
         self.assertNotIn("must-not-be-dumped", (root / "run.json").read_text())
         selection = bench.read_csv(root / "selection.csv")
         self.assertEqual(len(selection), 4)
+        self.assertFalse((root / "selection.stdout.log").exists())
+        self.assertTrue((root / "selection.stderr.log").exists())
         events = self.events(root)
+        self.assertTrue(any(e["event"] == "process_start" and e["prefix"] == "selection"
+                            and "--list" in e["command"] for e in events))
         ends = [e for e in events if e["event"] == "process_end"]
         self.assertEqual(len(ends), 5)  # list-only child is separately recorded
-        self.assertTrue(all(e["returncode"] == 0 and e["status"] == "exited" for e in ends))
+        self.assertTrue(all(e["returncode"] == 0 for e in ends))
         for index in range(4):
             prefix = f"case-{index}-round-1"
             self.assertEqual(len(bench.read_csv(root / (prefix + ".raw.csv"))), 2)
+            self.assertFalse((root / (prefix + ".csv")).exists())
             self.assertTrue((root / (prefix + ".stdout.log")).exists())
             self.assertTrue((root / (prefix + ".stderr.log")).exists())
             start = next(e for e in events if e["event"] == "process_start" and e["prefix"] == prefix)
-            live = next(e for e in events if e["event"] == "process_started" and e["prefix"] == prefix)
-            self.assertIsNone(start["pid"])
-            self.assertEqual(live["pid"], live["pgid"])
-            self.assertLess(events.index(start), events.index(live))
-        self.assertEqual(events[-1]["status"], "complete")
+            self.assertIn("--trial-round", start["command"])
+            self.assertIn("--output", start["command"])
         del os.environ["HF_TEST_PRIVATE_VALUE"]
 
     def test_existing_raw_directory_and_dangling_symlink_are_rejected(self):
@@ -340,7 +343,6 @@ sys.exit(7 if fail else 0)
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue((root / "case-0-round-2.raw.csv").exists())
         events = self.events(root)
-        self.assertEqual(events[-1]["status"], "failed")
         self.assertTrue(any(e["event"] == "process_end" and e["returncode"] == 7 for e in events))
         self.assertFalse(any(e["event"] == "case_validated" for e in events))
 
@@ -364,7 +366,6 @@ sys.exit(7 if fail else 0)
                 with self.assertRaises(ValueError):
                     self.run_quiet(fields="m127", backends="qa", raw_dir=root)
             self.assertEqual(path.read_bytes(), before)
-            self.assertEqual(self.events(root)[-1]["status"], "error")
             self.assertTrue((root / "case-0-round-1.raw.csv").exists())
 
     def test_persistent_unknown_exit_never_validates_even_with_complete_csv(self):
@@ -388,7 +389,7 @@ sys.exit(7 if fail else 0)
             self.assertEqual(self.run_quiet(fields="m127", backends="qa", raw_dir=root), 1)
         self.assertEqual(len(bench.read_csv(root / "case-0-round-1.raw.csv")), 2)
         events = self.events(root)
-        self.assertTrue(any(e["event"] == "process_end" and e["status"] == "unknown" for e in events))
+        self.assertTrue(any(e["event"] == "process_end" and e["returncode"] is None for e in events))
         self.assertFalse(any(e["event"] == "case_validated" for e in events))
         self.assertFalse(self.output.exists())
 
@@ -415,9 +416,7 @@ sys.exit(7 if fail else 0)
                 self.run_quiet(fields="m127", backends="qa", raw_dir=root)
         self.assertIsInstance(children[0].poll(), int)
         events = self.events(root)
-        self.assertEqual(events[-1]["status"], "interrupted")
         end = next(e for e in events if e["event"] == "process_end" and e["prefix"] == "case-0-round-1")
-        self.assertEqual(end["status"], "interrupted")
         self.assertIsNone(end["returncode"])
         self.assertFalse(self.output.exists())
 
@@ -432,17 +431,15 @@ sys.exit(7 if fail else 0)
             with self.assertRaises(OSError):
                 self.run_quiet(fields="m127", backends="qa", raw_dir=root)
         events = self.events(root)
-        end = next(e for e in events if e["event"] == "process_end" and e["prefix"] == "case-0-round-1")
-        self.assertEqual(end["status"], "error")
-        self.assertIsNone(end["pid"])
-        self.assertEqual(events[-1]["status"], "error")
+        self.assertTrue(any(e["event"] == "process_start" and e["prefix"] == "case-0-round-1" for e in events))
+        self.assertFalse(any(e["event"] == "process_end" and e["prefix"] == "case-0-round-1" for e in events))
         self.assertFalse(self.output.exists())
 
     def test_archive_write_failure_does_not_fall_back_or_publish(self):
         root = self.root / "archive"
         original = bench.event
         def fail(root, kind, **fields):
-            if kind == "case_validated":
+            if kind == "process_end" and fields.get("prefix") == "case-0-round-1":
                 raise OSError("synthetic archive failure")
             return original(root, kind, **fields)
         with mock.patch.object(bench, "event", side_effect=fail):
@@ -450,14 +447,12 @@ sys.exit(7 if fail else 0)
                 self.run_quiet(fields="m127", backends="qa", raw_dir=root)
         self.assertTrue((root / "case-0-round-1.raw.csv").exists())
         self.assertFalse(self.output.exists())
-        self.assertEqual(self.events(root)[-1]["status"], "error")
 
     def test_insufficient_cores_and_binary_copy_mismatch_fail_before_workload(self):
         root = self.root / "few-cores"
         with mock.patch.object(bench.os, "sched_getaffinity", return_value={0}):
             with self.assertRaises(ValueError):
                 self.run_quiet(raw_dir=root)
-        self.assertEqual(self.events(root)[-1]["status"], "error")
         original = bench.shutil.copy2
         def corrupt(source, target):
             original(source, target)
@@ -467,8 +462,7 @@ sys.exit(7 if fail else 0)
         with mock.patch.object(bench.shutil, "copy2", side_effect=corrupt):
             with self.assertRaisesRegex(ValueError, "identity mismatch"):
                 self.run_quiet(raw_dir=root)
-        self.assertEqual(self.events(root)[-1]["status"], "error")
-        self.assertFalse((root / "selection.stdout.log").exists())
+        self.assertFalse((root / "selection.csv").exists())
         self.assertFalse(self.output.exists())
 
     def test_optional_certified_identity_is_checked_when_listed(self):

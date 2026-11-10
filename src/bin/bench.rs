@@ -40,7 +40,7 @@ struct Args {
     /// List selected certified rows without allocating Setup or running timings.
     #[arg(long)]
     list: bool,
-    /// New summary path; companion .raw.csv must also be absent.
+    /// New raw sample CSV path; must not already exist.
     #[arg(long, required_unless_present = "list")]
     output: Option<PathBuf>,
 }
@@ -143,38 +143,17 @@ fn fresh(path: &Path, header: &str) -> Result<BufWriter<File>> {
     file.flush()?;
     Ok(file)
 }
-fn outputs(path: &Path) -> Result<(BufWriter<File>, BufWriter<File>)> {
-    let raw = path.with_extension("raw.csv");
-    for p in [path, raw.as_path()] {
-        match std::fs::symlink_metadata(p) {
-            Ok(_) => return Err(format!("output must be new: {}", p.display()).into()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let stats = METRICS
-        .iter()
-        .flat_map(|m| [format!("{m}_mean"), format!("{m}_sample_sd")])
-        .collect::<Vec<_>>()
-        .join(",");
-    let summary = fresh(
+fn outputs(path: &Path) -> Result<BufWriter<File>> {
+    fresh(
         path,
-        &format!("{ID},status,measured_repetitions,{stats},{PROOF}"),
-    )?;
-    let raw = fresh(
-        &raw,
         &format!("{ID},repetition,{},{PROOF}", METRICS.join(",")),
-    )?;
-    Ok((summary, raw))
+    )
 }
 fn run<F: SampleBase, E: ExtensionField<F>>(
     c: HyperFoldConfig,
     args: &Args,
-    summary: &mut impl Write,
     raw: &mut impl Write,
 ) -> Result<()> {
-    let mut samples = Vec::with_capacity(args.repetitions);
-    let mut last = None;
     for repetition in 0..=args.repetitions {
         let r = run_trial::<F, E>(c)?;
         if repetition == 0 {
@@ -186,25 +165,7 @@ fn run<F: SampleBase, E: ExtensionField<F>>(
         row.extend(proof_cells(&r));
         writeln!(raw, "{}", row.join(","))?;
         raw.flush()?;
-        samples.push(r.metrics());
-        last = Some(r);
     }
-    let mut row = identity(c, args);
-    row.extend(["measured".into(), samples.len().to_string()]);
-    for m in 0..METRICS.len() {
-        let mean = samples.iter().map(|r| r[m]).sum::<f64>() / samples.len() as f64;
-        let sd = if samples.len() > 1 {
-            (samples.iter().map(|r| (r[m] - mean).powi(2)).sum::<f64>()
-                / (samples.len() - 1) as f64)
-                .sqrt()
-        } else {
-            0.
-        };
-        row.extend([format!("{mean:.6}"), format!("{sd:.6}")]);
-    }
-    row.extend(proof_cells(&last.unwrap()));
-    writeln!(summary, "{}", row.join(","))?;
-    summary.flush()?;
     Ok(())
 }
 fn main() -> Result<()> {
@@ -217,7 +178,7 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let (mut summary, mut raw) = outputs(args.output.as_ref().unwrap())?;
+    let mut raw = outputs(args.output.as_ref().unwrap())?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build()?
@@ -227,12 +188,8 @@ fn main() -> Result<()> {
                     BaseFieldKind::Goldilocks => run::<
                         Goldilocks,
                         CubicTrinomialExtensionField<Goldilocks>,
-                    >(
-                        c, &args, &mut summary, &mut raw
-                    )?,
-                    BaseFieldKind::M127 => {
-                        run::<Mersenne127, M127Quad>(c, &args, &mut summary, &mut raw)?
-                    }
+                    >(c, &args, &mut raw)?,
+                    BaseFieldKind::M127 => run::<Mersenne127, M127Quad>(c, &args, &mut raw)?,
                 }
             }
             Ok(())
@@ -262,32 +219,20 @@ mod tests {
     }
     #[test]
     fn old_outputs_are_unchanged() {
-        for (index, which) in ["summary", "raw", "both"].iter().enumerate() {
-            let dir = std::env::temp_dir().join(format!(
-                "hyperfold-one-shot-output-{}-{index}",
-                std::process::id()
-            ));
-            std::fs::create_dir(&dir).unwrap();
-            let path = dir.join("results.csv");
-            let raw = path.with_extension("raw.csv");
-            if *which != "raw" {
-                std::fs::write(&path, b"old-summary\n").unwrap()
-            }
-            if *which != "summary" {
-                std::fs::write(&raw, b"old-raw\n").unwrap()
-            }
-            assert!(outputs(&path).is_err());
-            if *which != "raw" {
-                assert_eq!(std::fs::read(&path).unwrap(), b"old-summary\n")
-            } else {
-                assert!(!path.exists())
-            }
-            if *which != "summary" {
-                assert_eq!(std::fs::read(&raw).unwrap(), b"old-raw\n")
-            } else {
-                assert!(!raw.exists())
-            }
-            std::fs::remove_dir_all(dir).unwrap();
-        }
+        let dir =
+            std::env::temp_dir().join(format!("hyperfold-one-shot-output-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("samples.csv");
+        std::fs::write(&path, b"old-raw\n").unwrap();
+        assert!(outputs(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old-raw\n");
+        std::fs::remove_file(&path).unwrap();
+        drop(outputs(&path).unwrap());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{ID},repetition,{},{PROOF}\n", METRICS.join(","))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

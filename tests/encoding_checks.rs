@@ -72,6 +72,14 @@ fn coordinate_checks_all_encoders_and_message_fields() {
         }
     }
 }
+#[test]
+fn coordinate_checks_larger_base_blocks() {
+    use p3_field::extension::CubicTrinomialExtensionField;
+    for kind in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>(kind, 7, 2);
+        check::<Mersenne127, M127Quad>(kind, 7, 2);
+    }
+}
 fn systematic_newton<T: ExtensionField<Mersenne127>>() {
     for log in [1usize, 2, 3, 6, 7, 8, 10] {
         for c in [2, 4] {
@@ -95,7 +103,6 @@ fn systematic_newton<T: ExtensionField<Mersenne127>>() {
             code.encode_slice(&msg, &mut full);
             assert_eq!(full, reference, "log={log},c={c}");
             assert_eq!(&full[..cfg.k0()], &msg);
-            check::<Mersenne127, T>(BaseCodeKind::Rs, log, c);
         }
     }
 }

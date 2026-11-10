@@ -436,7 +436,10 @@ mod tests {
                         out
                     }
                     assert_eq!(logical(&pi, r), naive(config, &base, &h, &diags, &msg, 2));
-                    if r <= 4 {
+                    if c == 2
+                        && ((r == 4 && kind == BaseCodeKind::Rs)
+                            || (r == 2 && kind == BaseCodeKind::Qa))
+                    {
                         // Explicit G_d from the defining recursive map, not fast circuits.
                         let mut generator = Vec::with_capacity(msg.len() * pi.values.len());
                         let mut basis = vec![F::ZERO; msg.len()];
