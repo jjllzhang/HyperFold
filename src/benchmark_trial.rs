@@ -1,6 +1,7 @@
 //! One complete fresh-Setup trial shared by the CLI and Criterion.
 use crate::{
     codec,
+    matrix_h::MatrixKind,
     params::HyperFoldConfig,
     pcs::HyperFoldPcs,
     sampling::{SampleBase, stream},
@@ -28,9 +29,15 @@ pub struct TrialRecord {
 pub fn run_trial<F: SampleBase, E: ExtensionField<F>>(
     config: HyperFoldConfig,
 ) -> Result<TrialRecord> {
+    run_trial_with_matrix::<F, E>(config, MatrixKind::Specialized)
+}
+pub fn run_trial_with_matrix<F: SampleBase, E: ExtensionField<F>>(
+    config: HyperFoldConfig,
+    matrix: MatrixKind,
+) -> Result<TrialRecord> {
     let wall = Instant::now();
     let timer = Instant::now();
-    let pcs = HyperFoldPcs::<F, E>::setup(config, [42; 32])?;
+    let pcs = HyperFoldPcs::<F, E>::setup_with_matrix(config, [42; 32], matrix)?;
     let setup = ms(timer.elapsed());
     let timer = Instant::now();
     let mut rng = stream(&[27; 32], b"benchmark-message", config.mu as u64);

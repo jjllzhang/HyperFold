@@ -1,6 +1,7 @@
 use hyperfold_pcs::{
     codec,
     field_m127::{M127Quad, Mersenne127},
+    matrix_h::MatrixKind,
     params::{BaseCodeKind, HyperFoldConfig},
     pcs::{HyperFoldPcs, Proof},
     sampling::{SampleBase, stream},
@@ -63,6 +64,41 @@ fn pcs_parameter_matrix_end_to_end_gold_quad_functional_only() {
 #[test]
 fn pcs_parameter_matrix_end_to_end_m127() {
     matrix::<Mersenne127, M127Quad>();
+}
+fn matrix_families_end_to_end<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>>() {
+    let mut rng = stream(&[201; 32], b"matrix-family-pcs", 0);
+    for r in [2usize, 4, 8] {
+        for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+            let config = HyperFoldConfig::testing(
+                F::KIND,
+                backend,
+                2 + 2 * r.ilog2() as usize,
+                2,
+                r,
+                2,
+                E::DIMENSION,
+            )
+            .unwrap();
+            let special = HyperFoldPcs::<F, E>::setup(config, [4; 32]).unwrap();
+            let general =
+                HyperFoldPcs::<F, E>::setup_with_matrix(config, [4; 32], MatrixKind::General)
+                    .unwrap();
+            for (prover, other) in [(&special, &general), (&general, &special)] {
+                let msg: Vec<F> = (0..config.k()).map(|_| F::sample(&mut rng)).collect();
+                let (cm, data) = prover.commit(msg).unwrap();
+                let z = point::<F, E>(config.mu, &mut rng);
+                let y = evaluate(&data.message, &z);
+                let (proof, _) = prover.open(&cm, &data, &z, y).unwrap();
+                prover.verify(&cm, &z, y, &proof).unwrap();
+                assert!(other.verify(&cm, &z, y, &proof).is_err());
+            }
+        }
+    }
+}
+#[test]
+fn matrix_family_roundtrips_and_parameter_binding() {
+    matrix_families_end_to_end::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+    matrix_families_end_to_end::<Mersenne127, M127Quad>();
 }
 #[test]
 fn tamper_rejection_and_strict_codec() {
@@ -329,6 +365,7 @@ mod golden {
     use hyperfold_pcs::{
         codec,
         field_m127::{M127Quad, Mersenne127},
+        matrix_h::MatrixKind,
         params::{BaseCodeKind, BaseFieldKind, HyperFoldConfig},
         pcs::HyperFoldPcs,
         sampling::{SampleBase, stream},
@@ -338,7 +375,8 @@ mod golden {
     use p3_field::extension::CubicTrinomialExtensionField;
     use p3_goldilocks::Goldilocks;
     fn fingerprint<F: SampleBase, E: ExtensionField<F>>(config: HyperFoldConfig) -> String {
-        let pcs = HyperFoldPcs::<F, E>::setup(config, [17; 32]).unwrap();
+        let pcs =
+            HyperFoldPcs::<F, E>::setup_with_matrix(config, [17; 32], MatrixKind::Legacy).unwrap();
         let mut rng = stream(&[18; 32], b"golden-message", config.mu as u64);
         let message = (0..config.k())
             .map(|_| F::sample(&mut rng))

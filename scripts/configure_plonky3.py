@@ -24,15 +24,22 @@ manifest = pathlib.Path(__file__).resolve().parents[1] / "Cargo.toml"
 original = manifest.read_text()
 text = original
 for name, dependency in tomllib.loads(original)["dependencies"].items():
-    if name.startswith("p3-") and isinstance(dependency, dict) and "path" in dependency:
-        component = pathlib.Path(dependency["path"]).name
+    if name.startswith("p3-") and isinstance(dependency, dict):
+        component = name.removeprefix("p3-")
         target = checkout / component
         if not (target / "Cargo.toml").is_file():
             raise SystemExit(f"missing dependency {component}")
-        pattern = rf'(?m)^({re.escape(name)}\s*=\s*\{{\s*path\s*=\s*)"(?:[^"\\]|\\.)*"'
-        text, count = re.subn(pattern, lambda m: m[1] + json.dumps(str(target)), text)
+        if "path" in dependency:
+            source = r'path\s*=\s*"(?:[^"\\]|\\.)*"'
+        elif (dependency.get("git") == "https://github.com/Plonky3/Plonky3"
+              and dependency.get("rev") == EXPECTED):
+            source = r'git\s*=\s*"(?:[^"\\]|\\.)*"\s*,\s*rev\s*=\s*"(?:[^"\\]|\\.)*"'
+        else:
+            raise SystemExit(f"unexpected dependency source for {name}")
+        pattern = rf'(?m)^({re.escape(name)}\s*=\s*\{{\s*){source}'
+        text, count = re.subn(pattern, lambda m: m[1] + "path = " + json.dumps(str(target)), text)
         if count != 1:
-            raise SystemExit(f"expected one path entry for {name}")
+            raise SystemExit(f"expected one source entry for {name}")
 tomllib.loads(text)
 manifest.write_text(text)
 print(f"Configured Plonky3 {revision} at {checkout}")

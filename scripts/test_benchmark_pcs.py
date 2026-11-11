@@ -32,11 +32,11 @@ listing='--list' in argv
 if listing: argv.remove('--list')
 a=dict(zip(argv[::2],argv[1::2]))
 if listing:
- print('schema_version,field,backend,mu,r,c')
+ print('schema_version,matrix,field,backend,mu,r,c')
  for field in ['Goldilocks','M127']:
   for code in ['Qa','Rs']:
    if field.lower() in a['--fields'].split(',') and code.lower() in a['--backends'].split(','):
-    print('hyperfold-pcs-bench-v2,'+field+','+code+',20,2,4')
+    print('hyperfold-pcs-bench-v3,'+a['--matrix']+','+field+','+code+',20,2,4')
  sys.exit(0)
 count=pathlib.Path(os.environ['HF_TEST_COUNTER'])
 n=int(count.read_text())+1 if count.exists() else 1
@@ -46,10 +46,10 @@ short=n==int(os.environ.get('HF_TEST_SHORT_AT','0'))
 p=pathlib.Path(a['--output'])
 with p.open('w',newline='') as f:
  w=csv.writer(f)
- w.writerow(['schema_version','field','backend','mu','r','c','trial_round','repetition','commit_ms','open_ms','verify_ms','proof_size_bytes'])
+ w.writerow(['schema_version','matrix','field','backend','mu','r','c','trial_round','repetition','commit_ms','open_ms','verify_ms','proof_size_bytes'])
  for i in range(1 if fail or short else int(a['--repetitions'])):
   value=1+2*i+10*(int(a['--trial-round'])-1)
-  w.writerow(['hyperfold-pcs-bench-v2',a['--fields'],a['--backends'],20,2,4,a['--trial-round'],i+1,value,value+100,value+200,12])
+  w.writerow(['hyperfold-pcs-bench-v3',a['--matrix'],a['--fields'],a['--backends'],20,2,4,a['--trial-round'],i+1,value,value+100,value+200,12])
 sys.exit(7 if fail else 0)
 """)
         self.binary.chmod(0o755)
@@ -67,6 +67,7 @@ sys.exit(7 if fail else 0)
     def args(self, **changes):
         args = dict(
             binary=self.binary,
+            matrix="specialized",
             output_dir=self.output,
             fields="goldilocks,m127",
             backends="qa,rs",
@@ -122,6 +123,11 @@ sys.exit(7 if fail else 0)
             self.assertEqual(rows[0]["open_ms"], "102.000000000")
             self.assertEqual(rows[0]["verify_ms"], "202.000000000")
             self.assertEqual(rows[0]["proof_bytes"], "12")
+
+    def test_general_results_are_separate(self):
+        self.assertEqual(self.run_quiet(matrix="general", fields="m127", backends="qa"), 0)
+        self.assertTrue((self.output / "general/m127-qa.csv").exists())
+        self.assertFalse((self.output / "m127-qa.csv").exists())
 
     def test_existing_rows_are_read_and_unselected_values_preserved(self):
         untouched = self.row(mu=22, commit="100.000000123")
@@ -468,7 +474,7 @@ sys.exit(7 if fail else 0)
     def test_optional_certified_identity_is_checked_when_listed(self):
         self.run_quiet(fields="m127", backends="qa", raw_dir=self.root / "archive")
         raw = self.root / "archive/case-0-round-1.raw.csv"
-        job = dict(schema_version=bench.SCHEMA, field="M127", backend="Qa", mu="20",r="2",c="4",threads="32")
+        job = dict(schema_version=bench.SCHEMA, matrix="specialized", field="M127", backend="Qa", mu="20",r="2",c="4",threads="32")
         with self.assertRaisesRegex(ValueError, "threads"):
             bench.read_round(raw, job, 1, 2)
 

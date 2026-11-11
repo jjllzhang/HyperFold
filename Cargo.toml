@@ -5,13 +5,13 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-p3-field = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/field" }
-p3-goldilocks = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/goldilocks" }
-p3-matrix = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/matrix" }
-p3-maybe-rayon = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/maybe-rayon", features = ["parallel"] }
-p3-symmetric = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/symmetric" }
-p3-commit = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/commit" }
-p3-merkle-tree = { path = "/home/zjl/BinaryField-Bench/vendor/Plonky3/merkle-tree" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82", features = ["parallel"] }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "0d803737b681774186cd283b1fd2d8e493655c82" }
 num-bigint = "0.5.1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["alloc"] }

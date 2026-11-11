@@ -1,9 +1,28 @@
-//! The exact H₂ᵀ, corrected H₄ᵀ, and symmetric Pascal P₈ operators.
+//! Specialized local matrices and a general symmetric Pascal alternative.
 use p3_field::{Algebra, Field};
+/// Local matrix family. Legacy is retained for historical proof reproduction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MatrixKind {
+    #[default]
+    Specialized,
+    General,
+    #[doc(hidden)]
+    Legacy,
+}
+impl MatrixKind {
+    pub fn tag(self) -> &'static [u8] {
+        match self {
+            Self::Specialized => b"specialized-v1",
+            Self::General => b"pascal-v1",
+            Self::Legacy => b"legacy",
+        }
+    }
+}
 #[derive(Debug)]
 pub struct LocalMatrix<F> {
     pub r: usize,
     pub matrix: Vec<F>,
+    pub kind: MatrixKind,
 }
 fn binom(n: usize, k: usize) -> usize {
     if k > n {
@@ -13,31 +32,53 @@ fn binom(n: usize, k: usize) -> usize {
 }
 impl<F: Field> LocalMatrix<F> {
     pub fn new(r: usize) -> Self {
+        Self::with_kind(r, MatrixKind::Specialized)
+    }
+    pub fn with_kind(r: usize, kind: MatrixKind) -> Self {
         assert!([2, 4, 8].contains(&r));
-        let matrix = if r == 2 {
-            [1, 1, 1, 2].map(F::from_usize).to_vec()
-        } else if r == 4 {
-            [2, 3, 1, 1, 1, 2, 3, 4, 1, 1, 2, 3, 3, 4, 1, 2]
-                .map(F::from_usize)
-                .to_vec()
-        } else {
+        let signed: &[i32] = match (kind, r) {
+            (MatrixKind::Specialized, 4) => &[1, 2, 1, 1, 1, 3, 2, 3, -1, -1, 1, 2, -2, -3, 1, 3],
+            (MatrixKind::Specialized, 8) => &[
+                3, -7, -9, -5, 11, 23, -18, 17, 2, -2, -4, -4, 15, 18, -17, 16, -16, 12, -5, -2,
+                13, 36, -33, 17, 15, -10, 6, 2, 4, -21, 17, -1, 11, -9, 6, 5, 19, -1, -1, 17, 5,
+                -6, -5, -4, -18, -14, 16, -16, 13, -16, 1, 5, -2, -12, 15, 2, 16, -19, -3, 1, -3,
+                -10, 14, 2,
+            ],
+            (MatrixKind::Legacy, 4) => &[2, 3, 1, 1, 1, 2, 3, 4, 1, 1, 2, 3, 3, 4, 1, 2],
+            _ => &[],
+        };
+        let matrix = if signed.is_empty() {
             (0..r)
                 .flat_map(|i| (0..r).map(move |j| F::from_usize(binom(i + j, i))))
                 .collect()
+        } else {
+            signed
+                .iter()
+                .map(|&v| {
+                    let n = F::from_usize(v.unsigned_abs() as usize);
+                    if v < 0 { -n } else { n }
+                })
+                .collect()
         };
-        Self { r, matrix }
+        Self { r, matrix, kind }
     }
     pub fn forward<T: Field + Algebra<F>>(&self, x: &mut [T; 8], diag: &[F]) {
         for a in 1..self.r {
             x[a] *= diag[a - 1];
         }
-        match self.r {
-            2 => {
+        match (self.kind, self.r) {
+            (MatrixKind::General, _) | (MatrixKind::Legacy, 8) => {
+                pascal_upper(x, self.r, false);
+                pascal_lower(x, self.r, false);
+            }
+            (_, 2) => {
                 let a = x[0] + x[1];
                 x[0] = a;
                 x[1] = a + x[1];
             }
-            4 => {
+            (MatrixKind::Specialized, 4) => h4_forward(x),
+            (MatrixKind::Specialized, 8) => h8_forward(x),
+            (MatrixKind::Legacy, 4) => {
                 let s01 = x[0] + x[1];
                 let s23 = x[2] + x[3];
                 let t123 = x[1] + s23;
@@ -49,25 +90,23 @@ impl<F: Field> LocalMatrix<F> {
                 x[2] = w2;
                 x[3] = w0 + t013;
             }
-            8 => {
-                pascal_upper(x, false);
-                pascal_lower(x, false);
-            }
             _ => unreachable!(),
         }
     }
     pub fn unscale_inverse<T: Field + Algebra<F>>(&self, x: &mut [T; 8], diag_inv: &[F]) {
-        match self.r {
-            2 => {
+        match (self.kind, self.r) {
+            (MatrixKind::General, _) | (MatrixKind::Legacy, 8) => {
+                pascal_lower(x, self.r, true);
+                pascal_upper(x, self.r, true);
+            }
+            (_, 2) => {
                 let b = x[1] - x[0];
                 x[0] -= b;
                 x[1] = b;
             }
-            8 => {
-                pascal_lower(x, true);
-                pascal_upper(x, true);
-            }
-            4 => h4_inverse(x),
+            (MatrixKind::Specialized, 4) => h4_inverse(x),
+            (MatrixKind::Specialized, 8) => h8_inverse(x),
+            (MatrixKind::Legacy, 4) => legacy_h4_inverse(x),
             _ => unreachable!(),
         }
         for a in 1..self.r {
@@ -75,10 +114,91 @@ impl<F: Field> LocalMatrix<F> {
         }
     }
 }
-// Eleven binary additions/subtractions and two exact halvings. This returns
-// M^-1 y, not 2 M^-1 y: callers retain their original challenge weights.
-#[inline]
-fn h4_inverse<T: Field>(x: &mut [T; 8]) {
+fn h4_forward<F: Field>(x: &mut [F; 8]) {
+    x[2] = x[2] + x[3];
+    x[0] = x[0] + x[1].double();
+    x[3] = x[3] - x[0];
+    x[1] = x[1] + x[3];
+    x[0] = x[0] + x[2];
+    x[2] = x[2] + x[1];
+    x[1] = x[1] + x[0].double();
+    x[3] = x[3] + x[2];
+}
+
+#[inline(always)]
+fn h4_inverse<F: Field>(x: &mut [F; 8]) {
+    x[3] = x[3] - x[2];
+    x[1] = x[1] - x[0].double();
+    x[2] = x[2] - x[1];
+    x[0] = x[0] - x[2];
+    x[1] = x[1] - x[3];
+    x[3] = x[3] + x[0];
+    x[0] = x[0] - x[1].double();
+    x[2] = x[2] - x[3];
+}
+
+#[inline(always)]
+fn h8_forward<F: Field>(x: &mut [F; 8]) {
+    x[6] = x[6] - x[5];
+    x[2] = x[2] + x[1];
+    x[5] = x[5] - x[4];
+    x[3] = x[3] + x[2];
+    x[1] = x[1] - x[0];
+    x[7] = x[7] - x[6];
+    x[4] = x[4] + x[7];
+    x[2] = x[2] - x[5];
+    x[0] = x[0] - x[3];
+    x[6] = x[6] - x[1];
+    x[7] = x[7] - x[2].double().double();
+    x[5] = x[5] + x[0].double().double();
+    x[3] = x[3] + x[6].mul_2exp_u64(4);
+    x[1] = x[1] + x[4].mul_2exp_u64(4);
+    x[2] = x[2] + x[1];
+    x[0] = x[0] + x[7];
+    x[6] = x[6] - x[5];
+    x[4] = x[4] + x[3];
+    x[1] = x[1] - x[6];
+    x[7] = x[7] + x[4];
+    x[5] = x[5] - x[2];
+    x[3] = x[3] - x[0];
+    x[6] = x[6] + x[7];
+    x[4] = x[4] - x[5];
+    x[2] = x[2] - x[3];
+    x[0] = x[0] + x[1];
+}
+
+#[inline(always)]
+fn h8_inverse<F: Field>(x: &mut [F; 8]) {
+    x[0] = x[0] - x[1];
+    x[2] = x[2] + x[3];
+    x[4] = x[4] + x[5];
+    x[6] = x[6] - x[7];
+    x[3] = x[3] + x[0];
+    x[5] = x[5] + x[2];
+    x[7] = x[7] - x[4];
+    x[1] = x[1] + x[6];
+    x[4] = x[4] - x[3];
+    x[6] = x[6] + x[5];
+    x[0] = x[0] - x[7];
+    x[2] = x[2] - x[1];
+    x[1] = x[1] - x[4].mul_2exp_u64(4);
+    x[3] = x[3] - x[6].mul_2exp_u64(4);
+    x[5] = x[5] - x[0].double().double();
+    x[7] = x[7] + x[2].double().double();
+    x[6] = x[6] + x[1];
+    x[0] = x[0] + x[3];
+    x[2] = x[2] + x[5];
+    x[4] = x[4] - x[7];
+    x[7] = x[7] + x[6];
+    x[1] = x[1] + x[0];
+    x[3] = x[3] - x[2];
+    x[5] = x[5] + x[4];
+    x[2] = x[2] - x[1];
+    x[6] = x[6] + x[5];
+}
+
+// Historical H4 inverse, retained for frozen proof compatibility.
+fn legacy_h4_inverse<T: Field>(x: &mut [T; 8]) {
     let a = x[1] - x[2];
     let b = x[3] - x[0];
     let q = x[0] - a;
@@ -91,31 +211,31 @@ fn h4_inverse<T: Field>(x: &mut [T; 8]) {
     let x3 = b - h;
     x[..4].copy_from_slice(&[x0, x1, x2, x3]);
 }
-fn pascal_lower<T: Field>(x: &mut [T; 8], inverse: bool) {
+fn pascal_lower<T: Field>(x: &mut [T; 8], r: usize, inverse: bool) {
     if inverse {
-        for stage in (0..7).rev() {
-            for j in stage + 1..8 {
+        for stage in (0..r - 1).rev() {
+            for j in stage + 1..r {
                 x[j] -= x[j - 1];
             }
         }
     } else {
-        for stage in 0..7 {
-            for j in (stage + 1..8).rev() {
+        for stage in 0..r - 1 {
+            for j in (stage + 1..r).rev() {
                 x[j] += x[j - 1];
             }
         }
     }
 }
-fn pascal_upper<T: Field>(x: &mut [T; 8], inverse: bool) {
+fn pascal_upper<T: Field>(x: &mut [T; 8], r: usize, inverse: bool) {
     if inverse {
-        for stage in 0..7 {
-            for j in (stage + 1..8).rev() {
+        for stage in 0..r - 1 {
+            for j in (stage + 1..r).rev() {
                 x[j - 1] -= x[j];
             }
         }
     } else {
-        for stage in (0..7).rev() {
-            for j in stage + 1..8 {
+        for stage in (0..r - 1).rev() {
+            for j in stage + 1..r {
                 x[j - 1] += x[j];
             }
         }
@@ -202,9 +322,56 @@ mod tests {
         checks::<Mersenne127, Mersenne127>();
         checks::<Mersenne127, M127Quad>();
     }
+    fn check_all_families<F: SampleBase, T: p3_field::ExtensionField<F>>() {
+        let mut rng = stream(&[191; 32], b"matrix-families", 0);
+        for kind in [MatrixKind::Specialized, MatrixKind::General] {
+            for r in [2, 4, 8] {
+                let h = LocalMatrix::<F>::with_kind(r, kind);
+                let inverse = invert(&h.matrix, r);
+                let diag: Vec<F> = (1..r).map(|_| crate::sampling::nonzero(&mut rng)).collect();
+                let dinv: Vec<_> = diag.iter().map(Field::inverse).collect();
+                for trial in 0..32 {
+                    let input: [T; 8] = core::array::from_fn(|i| {
+                        if trial < r {
+                            if i == trial { T::ONE } else { T::ZERO }
+                        } else {
+                            T::from_basis_coefficients_fn(|_| F::sample(&mut rng))
+                        }
+                    });
+                    let mut actual = input;
+                    h.forward(&mut actual, &diag);
+                    for i in 0..r {
+                        let expected: T = (0..r)
+                            .map(|j| {
+                                input[j]
+                                    * h.matrix[i * r + j]
+                                    * if j == 0 { F::ONE } else { diag[j - 1] }
+                            })
+                            .sum();
+                        assert_eq!(actual[i], expected, "{kind:?} r={r} row={i}");
+                    }
+                    let mut actual = input;
+                    h.unscale_inverse(&mut actual, &dinv);
+                    for i in 0..r {
+                        let expected: T = (0..r).map(|j| input[j] * inverse[i * r + j]).sum();
+                        let expected = expected * if i == 0 { F::ONE } else { dinv[i - 1] };
+                        assert_eq!(actual[i], expected, "{kind:?} inverse r={r} row={i}");
+                    }
+                    assert_eq!(&actual[r..], &input[r..]);
+                }
+            }
+        }
+    }
+    #[test]
+    fn all_families_match_explicit_matrix_and_inverse() {
+        check_all_families::<Goldilocks, Goldilocks>();
+        check_all_families::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check_all_families::<Mersenne127, Mersenne127>();
+        check_all_families::<Mersenne127, M127Quad>();
+    }
     fn r4_reference<F: SampleBase, T: p3_field::ExtensionField<F>>() {
         let mut rng = stream(&[157; 32], b"r4-reference", 0);
-        let h = LocalMatrix::<F>::new(4);
+        let h = LocalMatrix::<F>::with_kind(4, MatrixKind::Legacy);
         assert_eq!(
             h.matrix,
             [2usize, 3, 1, 1, 1, 2, 3, 4, 1, 1, 2, 3, 3, 4, 1, 2].map(F::from_usize)
@@ -288,9 +455,9 @@ mod tests {
         }
         d
     }
-    fn all_minors<F: Field>() {
+    fn all_minors<F: Field>(kind: MatrixKind) {
         for r in [2usize, 4, 8] {
-            let h = LocalMatrix::<F>::new(r);
+            let h = LocalMatrix::<F>::with_kind(r, kind);
             let mut count = 0;
             for rm in 1usize..1 << r {
                 for cm in 1usize..1 << r {
@@ -319,7 +486,9 @@ mod tests {
     }
     #[test]
     fn all_square_minors_nonzero_both_fields() {
-        all_minors::<Goldilocks>();
-        all_minors::<Mersenne127>();
+        for kind in [MatrixKind::Specialized, MatrixKind::General] {
+            all_minors::<Goldilocks>(kind);
+            all_minors::<Mersenne127>(kind);
+        }
     }
 }

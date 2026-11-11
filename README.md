@@ -16,7 +16,7 @@ Supported configurations:
 | `src/` | Core protocol (`pcs.rs`, `encoder.rs`, `base_code.rs`, `matrix_h.rs`, `sumcheck.rs`, `merkle_commitment.rs`, `field_m127.rs`, `params.rs`) and the `bench` CLI |
 | `tests/` | PCS correctness and regression tests |
 | `data/` | Parameter certificates (`*.csv`) and [readable parameter summary](data/parameter-profiles.md) |
-| `scripts/` | Plonky3 setup, parameter scripts, benchmark runner, and plotting |
+| `scripts/` | Optional Plonky3 setup, parameter scripts, benchmark runner, and plotting |
 | `results/` | Recorded 32-thread benchmark CSVs |
 | `figures/` | Performance plots generated from `results/` |
 
@@ -24,22 +24,16 @@ Supported configurations:
 
 Requires **Rust 1.95+** (and **Python 3.11+** for helper scripts).
 
-### 1. Configure Plonky3
+Cargo fetches [Plonky3](https://github.com/Plonky3/Plonky3) at the revision pinned in `Cargo.toml`. The first build needs network access.
 
-`Cargo.toml` uses local path dependencies pointing to a pinned [Plonky3](https://github.com/Plonky3/Plonky3) checkout (`0d803737b681774186cd283b1fd2d8e493655c82`):
-
-```sh
-git clone https://github.com/Plonky3/Plonky3.git ../Plonky3
-git -C ../Plonky3 checkout --detach 0d803737b681774186cd283b1fd2d8e493655c82
-python3 scripts/configure_plonky3.py ../Plonky3
-```
-
-### 2. Build and test
+### Build and test
 
 ```sh
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin bench
 cargo test --release -- --test-threads=1
 ```
+
+To use a clean local Plonky3 checkout at the pinned revision instead, run `python3 scripts/configure_plonky3.py /path/to/Plonky3`. This changes `Cargo.toml` to use local paths; Cargo will update the lockfile on the next build.
 
 ## Benchmarks
 
@@ -56,6 +50,10 @@ python3 scripts/benchmark_pcs.py \
 ```
 
 Omit the filter flags (`--fields`, `--backends`, `--mu`, `--r`, `--c`) to run all 144 configurations.
+
+Both benchmark commands default to `--matrix specialized` (fixed H₂, H₄ and H₈ circuits). Use `--matrix general` for symmetric Pascal matrices, `H[i,j] = binom(i+j,i)`. Matrix families have distinct PCS parameter IDs, so their proofs are not interchangeable; the library exposes this choice through `HyperFoldPcs::setup_with_matrix` and `matrix_h::MatrixKind`.
+
+The Python runner writes general results to `OUTPUT_DIR/general/`; pass that directory as `--input-dir` when plotting them. Use a fresh `--output-dir` for new runs to avoid mixing measurements.
 
 ## Results and figures
 

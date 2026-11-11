@@ -1,10 +1,10 @@
-//! HyperFold Protocols 4.1/4.2, compiled with the versioned research transcript.
+//! HyperFold commitment, opening, and verification with a versioned transcript.
 //! Only certified experiment rows claim an interactive IOP bound; Fiat–Shamir,
 //! public-seed Setup, Merkle and implementation security are not established here.
 use crate::{
     base_code::{BaseCode, BaseCodeImpl},
     encoder::{RecoveredFirstMatrix, beta, encode_top, fold_level, fold_row},
-    matrix_h::LocalMatrix,
+    matrix_h::{LocalMatrix, MatrixKind},
     merkle_commitment::{self, Digest, Opening, Tree},
     params::{DiagonalTables, Error, HyperFoldConfig, Result},
     sampling::SampleBase,
@@ -247,6 +247,14 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
     /// Standard Setup constructs both directions once. Convert to opening-only
     /// after the final commitment to release forward allocations without inversion.
     pub fn setup(config: HyperFoldConfig, seed: [u8; 32]) -> Result<Self> {
+        Self::setup_with_matrix(config, seed, MatrixKind::Specialized)
+    }
+    /// Select the local matrix family; both parties must use the same family.
+    pub fn setup_with_matrix(
+        config: HyperFoldConfig,
+        seed: [u8; 32],
+        matrix: MatrixKind,
+    ) -> Result<Self> {
         config.validate()?;
         if config.base_field != F::KIND
             || config.extension_degree != <E as BasedVectorSpace<F>>::DIMENSION
@@ -258,9 +266,13 @@ impl<F: SampleBase, E: ExtensionField<F> + AlgebraIdentity<F>> HyperFoldPcs<F, E
         hasher.update(&config.id());
         hasher.update(&seed);
         hasher.update(&E::algebra_id());
+        if matrix != MatrixKind::Legacy {
+            hasher.update(b"hyperfold-local-matrix-v1");
+            hasher.update(matrix.tag());
+        }
         let id = *hasher.finalize().as_bytes();
         let base = BaseCodeImpl::new(config, &seed)?;
-        let h = LocalMatrix::new(config.r);
+        let h = LocalMatrix::with_kind(config.r, matrix);
         let diagonals = DiagonalTables::new(config, &seed);
         Ok(Self {
             config,
