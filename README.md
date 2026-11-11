@@ -57,6 +57,10 @@ python3 scripts/benchmark_pcs.py \
 
 Omit the filter flags (`--fields`, `--backends`, `--mu`, `--r`, `--c`) to run all 144 configurations.
 
+`--matrix specialized` is the default for both the Rust CLI and the Python runner: it uses fixed H₂, H₄, and H₈ matrices with specialized forward and inverse circuits, applied in the `H x` direction. Use `--matrix general` to select the symmetric Pascal matrix `H[i,j] = binom(i+j,i)` for every arity instead. The selected family is included in raw benchmark identities and PCS parameter IDs; proofs are not interchangeable across families. The Rust library exposes `HyperFoldPcs::setup_with_matrix` and `matrix_h::MatrixKind`.
+
+For example, add `--matrix general` to either command above. The Python runner writes general result tables under `OUTPUT_DIR/general/`, separately from the specialized tables. The existing `results/` tables are historical measurements of the previous matrices; they must not be treated as measurements of the new default. Use a fresh `--output-dir` for new runs to avoid mixing old and new measurements. Plot a general run by passing its `general/` directory as `--input-dir`.
+
 ## Results and figures
 
 Recorded 32-thread measurements (AMD EPYC 9754; timings in `ms`, `proof_bytes` in bytes) are included in `results/`:

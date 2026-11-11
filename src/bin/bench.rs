@@ -1,8 +1,9 @@
 //! One official lifecycle for every certified field/code/size selection.
 use clap::Parser;
 use hyperfold_pcs::{
-    benchmark_trial::{METRICS, TrialRecord, run_trial},
+    benchmark_trial::{METRICS, TrialRecord, run_trial_with_matrix},
     field_m127::{M127Quad, Mersenne127},
+    matrix_h::MatrixKind,
     params::{BaseCodeKind, BaseFieldKind, CERTIFIED_CONFIGS, HyperFoldConfig},
     sampling::SampleBase,
 };
@@ -15,12 +16,15 @@ use std::{
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-const SCHEMA: &str = "hyperfold-pcs-bench-v2";
+const SCHEMA: &str = "hyperfold-pcs-bench-v3";
 #[derive(Parser, Debug)]
 #[command(
     about = "Fresh Setup, one-shot release and queried-row recovery; no legacy memory switches/resume"
 )]
 struct Args {
+    /// Local matrix family: specialized circuits or general Pascal matrix.
+    #[arg(long, default_value = "specialized", value_parser = ["specialized", "general"])]
+    matrix: String,
     #[arg(long, default_value_t = 32)]
     threads: usize,
     #[arg(long, default_value = "20..=30")]
@@ -108,6 +112,7 @@ fn configs(args: &Args) -> Result<Vec<HyperFoldConfig>> {
 fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
     vec![
         SCHEMA.into(),
+        args.matrix.clone(),
         format!("{:?}", c.base_field),
         format!("{:?}", c.backend),
         c.mu.to_string(),
@@ -125,7 +130,7 @@ fn identity(c: HyperFoldConfig, args: &Args) -> Vec<String> {
         "true".into(),
     ]
 }
-const ID: &str = "schema_version,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
+const ID: &str = "schema_version,matrix,field,backend,mu,r,c,mu0,depth,extension_degree,queries,threads,trial_round,first_tree_strategy,parameter_lifecycle,witness_lifecycle,setup_per_trial";
 const PROOF: &str = "commitment_bytes,eval_proof_bytes,proof_size_bytes";
 fn proof_cells(r: &TrialRecord) -> Vec<String> {
     vec![
@@ -155,7 +160,12 @@ fn run<F: SampleBase, E: ExtensionField<F>>(
     raw: &mut impl Write,
 ) -> Result<()> {
     for repetition in 0..=args.repetitions {
-        let r = run_trial::<F, E>(c)?;
+        let matrix = if args.matrix == "general" {
+            MatrixKind::General
+        } else {
+            MatrixKind::Specialized
+        };
+        let r = run_trial_with_matrix::<F, E>(c, matrix)?;
         if repetition == 0 {
             continue;
         }
@@ -202,6 +212,14 @@ mod tests {
     fn selection_and_removed_flags() {
         let args = Args::try_parse_from(["bench", "--list"]).unwrap();
         assert_eq!(configs(&args).unwrap().len(), 144);
+        assert_eq!(args.matrix, "specialized");
+        assert_eq!(
+            Args::try_parse_from(["bench", "--list", "--matrix", "general"])
+                .unwrap()
+                .matrix,
+            "general"
+        );
+        assert!(Args::try_parse_from(["bench", "--list", "--matrix", "invalid"]).is_err());
         assert_eq!(mus("20..=30").unwrap(), vec![20, 22, 24, 26, 28, 30]);
         assert!(mus("30..=20").is_err());
         for legacy in [

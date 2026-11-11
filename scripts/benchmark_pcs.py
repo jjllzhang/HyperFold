@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 
-SCHEMA = "hyperfold-pcs-bench-v2"  # Internal Rust CLI input, not the result table.
+SCHEMA = "hyperfold-pcs-bench-v3"  # Internal Rust CLI input, not the result table.
 COLUMNS = ["mu", "r", "c", "commit_ms", "open_ms", "verify_ms", "proof_bytes"]
 METRICS = COLUMNS[3:6]
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +40,8 @@ def result_path(root, job):
     field, code = job["field"].lower(), job["backend"].lower()
     if field not in ("goldilocks", "m127") or code not in ("qa", "rs"):
         raise ValueError("unknown field/code in benchmark selection")
+    if job.get("matrix", "specialized") == "general":
+        root = root / "general"
     return root / f"{field}-{code}.csv"
 
 
@@ -133,6 +135,7 @@ def read_round(path, job, round_number, repetitions):
     for row in rows:
         if (
             row["schema_version"] != SCHEMA
+            or row["matrix"] != job["matrix"]
             or config_key(row) != config_key(job)
             or row["field"].lower() != job["field"].lower()
             or row["backend"].lower() != job["backend"].lower()
@@ -203,6 +206,7 @@ def execute(args, root, archive):
     selection = [
         "--threads", "32", "--fields", args.fields, "--backends", args.backends,
         "--mu", args.mu, "--r", args.r, "--c", args.c,
+        "--matrix", args.matrix,
     ]
     code = run_process([str(binary), "--list", *selection], root=root,
                        archive=archive, prefix="selection", stdout_name="selection.csv")
@@ -225,7 +229,7 @@ def execute(args, root, archive):
             command = [
                 str(binary), "--fields", job["field"].lower(),
                 "--backends", job["backend"].lower(), "--mu", job["mu"],
-                "--r", job["r"], "--c", job["c"], "--threads", "32",
+                "--r", job["r"], "--c", job["c"], "--matrix", job["matrix"], "--threads", "32",
                 "--trial-round", str(round_number),
                 "--repetitions", str(args.repetitions), "--output", str(output),
             ]
@@ -278,6 +282,7 @@ def main():
         "--raw-dir", type=Path,
         help="new, previously absent directory retaining copied binary, samples and logs",
     )
+    parser.add_argument("--matrix", choices=["specialized", "general"], default="specialized")
     parser.add_argument("--fields", default="goldilocks,m127")
     parser.add_argument("--backends", default="qa,rs")
     parser.add_argument("--mu", default="20..=30")
