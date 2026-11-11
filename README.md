@@ -59,11 +59,11 @@ Omit the filter flags (`--fields`, `--backends`, `--mu`, `--r`, `--c`) to run al
 
 `--matrix specialized` is the default for both the Rust CLI and the Python runner: it uses fixed H₂, H₄, and H₈ matrices with specialized forward and inverse circuits, applied in the `H x` direction. Use `--matrix general` to select the symmetric Pascal matrix `H[i,j] = binom(i+j,i)` for every arity instead. The selected family is included in raw benchmark identities and PCS parameter IDs; proofs are not interchangeable across families. The Rust library exposes `HyperFoldPcs::setup_with_matrix` and `matrix_h::MatrixKind`.
 
-For example, add `--matrix general` to either command above. The Python runner writes general result tables under `OUTPUT_DIR/general/`, separately from the specialized tables. The existing `results/` tables are historical measurements of the previous matrices; they must not be treated as measurements of the new default. Use a fresh `--output-dir` for new runs to avoid mixing old and new measurements. Plot a general run by passing its `general/` directory as `--input-dir`.
+For example, add `--matrix general` to either command above. The Python runner writes general result tables under `OUTPUT_DIR/general/`, separately from the specialized tables. Use a fresh `--output-dir` for new runs to avoid mixing measurements from different batches. Plot a general run by passing its `general/` directory as `--input-dir`.
 
 ## Results and figures
 
-Recorded 32-thread measurements (AMD EPYC 9754; timings in `ms`, `proof_bytes` in bytes) are included in `results/`:
+Recorded 32-thread measurements (AMD EPYC 9754; timings in `ms`, `proof_bytes` in bytes) are included in `results/`. The `r=4,8` rows were remeasured with the current specialized matrices; `r=2` rows are historical measurements. The tables combine independent batches rather than one uniform rerun:
 
 - [Goldilocks QA](results/goldilocks-qa.csv) / [Goldilocks RS](results/goldilocks-rs.csv)
 - [M127 QA](results/m127-qa.csv) / [M127 RS](results/m127-rs.csv)
