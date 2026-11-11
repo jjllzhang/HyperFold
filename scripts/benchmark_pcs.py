@@ -200,7 +200,7 @@ def execute(args, root, archive):
             output_dir=str(args.output_dir.resolve()), role=args.role,
             rounds=args.rounds, repetitions=args.repetitions, warmups_per_process=1,
             memory=memory_snapshot(),
-            build_provenance="bind this copied binary SHA to the external build/freeze record",
+            build_provenance="binary SHA recorded; source-to-build provenance not automatically verified",
         )
         (root / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     selection = [

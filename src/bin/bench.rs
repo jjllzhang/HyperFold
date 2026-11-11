@@ -18,9 +18,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const SCHEMA: &str = "hyperfold-pcs-bench-v3";
 #[derive(Parser, Debug)]
-#[command(
-    about = "Fresh Setup, one-shot release and queried-row recovery; no legacy memory switches/resume"
-)]
+#[command(about = "Run HyperFold PCS benchmarks")]
 struct Args {
     /// Local matrix family: specialized circuits or general Pascal matrix.
     #[arg(long, default_value = "specialized", value_parser = ["specialized", "general"])]

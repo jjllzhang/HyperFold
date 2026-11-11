@@ -1,4 +1,4 @@
-//! HyperFold Protocols 4.1/4.2, compiled with the versioned research transcript.
+//! HyperFold commitment, opening, and verification with a versioned transcript.
 //! Only certified experiment rows claim an interactive IOP bound; Fiat–Shamir,
 //! public-seed Setup, Merkle and implementation security are not established here.
 use crate::{

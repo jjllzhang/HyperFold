@@ -7,8 +7,7 @@ Relative paths are resolved from the repository root, not the caller's cwd.
 
 Layout inspired by ReedWeave, ePrint 2026/2147, Figures 2/3 (mirror revision
 2026-10-29). Only the layout is borrowed, not measurements or sampling claims.
-The CSVs contain recorded benchmark means from historical experiment batches;
-these plots do not imply a new uniform rerun or provide a security proof.
+The CSVs contain recorded benchmark means; the plots do not provide a security proof.
 """
 
 import argparse
