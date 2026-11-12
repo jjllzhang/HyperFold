@@ -55,6 +55,31 @@ class ImportParamsTests(unittest.TestCase):
                              (self.source / f'{name}-parameters.csv').read_bytes())
         self.assertEqual(self.targets[2].read_text().count('    HyperFoldConfig {'), 144)
 
+    def test_legacy_columns_are_compacted_without_rounding_up(self):
+        path = self.source / 'm127-parameters.csv'
+        with path.open(newline='') as stream:
+            reader = csv.DictReader(stream)
+            fields = reader.fieldnames + ['Delta0_display', 'minimum_profile_queries']
+            rows = list(reader)
+        for row in rows:
+            row['Delta0_display'] = '0.5'
+            row['minimum_profile_queries'] = ''
+            row['total_IOP_bits_lower'] = '101.830999'
+        rows[0]['minimum_profile_queries'] = '123'
+        with path.open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        result = self.run_import()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with self.targets[1].open(newline='') as stream:
+            reader = csv.DictReader(stream)
+            imported = list(reader)
+        self.assertNotIn('Delta0_display', reader.fieldnames)
+        self.assertEqual(imported[0]['minimum_profile_queries'], '123')
+        self.assertEqual(imported[0]['total_IOP_bits_lower'], '101.830')
+        self.assertEqual(imported[0]['total_IOP_failure_upper_exact'], rows[0]['total_IOP_failure_upper_exact'])
+
     def test_invalid_input_never_writes_even_under_optimization(self):
         for column, value in [('certificate_version', 'bad'), ('target_bits', '99'),
                               ('total_IOP_failure_upper_exact', '0'),
