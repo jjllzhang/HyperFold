@@ -1,16 +1,14 @@
 # BaseFold benchmark results
 
-These measurements cover the optimized BaseFold implementation with Goldilocks or M127 base-field encoding, and challenges and folding over the cubic or quadratic extension, respectively. They are separate from the HyperFold benchmark results in this directory.
+These results measure an optimized version of [plonkish_basefold](https://github.com/hadasz/plonkish_basefold), using Goldilocks or M127 base-field encoding. Challenges and folding use the cubic or quadratic extension, respectively. The implementation was optimized with the aim of aligning its optimization level with HyperFold.
 
 ## Configuration and interpretation
 
 - Rate 1/2; base-code message length 64 and codeword length 128. RS has minimum distance 65. QA uses the systematic code `(m, H diag(a / 64) H m)` with random nonzero base-field diagonal entries.
 - AMD EPYC 9754, 32 physical cores pinned to CPUs 0–31, BLAKE3 Merkle hashing, shared Merkle multiproofs, optimized release build (`target-cpu=native`, thin LTO, one codegen unit).
 - One warmup followed by three measured samples. Times and proof sizes in the tables are medians. The prover median is taken from each sample’s commit-plus-open sum; it may differ from the sum of the two displayed medians. Setup, input generation and external evaluation are excluded; transcript writing is included in opening. Proof size includes the commitment.
-- Every measured sample was verified. `—` denotes an unmeasured metric. Distance and query entries are calculated parameters, not measurements of the actual minimum distance.
-- The query counts use the preceding conditional ordinary knowledge-soundness calculation with `gamma = 2^-24`, query-error budget `2^-102`, `beta = 1 - delta + k*gamma`, and `q = ceil(102 / -log2(beta))`; `delta = min(J_gamma(J_gamma(Delta)), (Delta + k*gamma)/3) - 10^-6`, where `J_gamma(x) = 1 - sqrt(1 - x*(1-gamma))` and `Delta` is the calculated relative distance lower bound.
-- These counts do **not** certify 100-bit PCS round-by-round knowledge soundness or Fiat–Shamir security. The recursive distance bound and its applicability to this implementation require independent justification. QA additionally assumes the imported random-base-code lower bounds `d0 >= 44` (Goldilocks) and `d0 >= 62` (M127); the probability of a bad QA base code is not included in this conditional ledger, and the fixed benchmark seed does not by itself certify its distance.
-- Results at `2^30` were not run. Measured peak RSS at `2^28` was approximately 150 GiB (Goldilocks) and 200 GiB (M127); linear extrapolation gives roughly 600 GiB and 800 GiB at `2^30`, exceeding the machine’s 503 GiB RAM. These figures are extrapolations, not measured peaks. QA odd exponents and QA `2^29` were not requested or measured.
+- Every measured sample was verified. `—` denotes an unmeasured metric. Distance bounds and query counts are calculated parameters rather than measurements of the actual minimum distance; their derivation and scope are described below.
+- At `2^28`, measured peak RSS was approximately 150 GiB for Goldilocks and 200 GiB for M127. Linear extrapolation to `2^30` gives approximately 600 GiB and 800 GiB, respectively, above the machine's 503 GiB RAM. The extrapolated values are not measured peaks. The `2^30` benchmarks were not run; QA odd exponents and QA `2^29` were not requested or measured.
 
 ## Results
 
@@ -70,8 +68,12 @@ These measurements cover the optimized BaseFold implementation with Goldilocks o
 | 28 | 0.31077717 | 760 | 20.086 | 40.409 | 60.448 | 71.089 | 4967200 | 199.99 |
 | 30 | 0.29689254 | 803 | — | — | — | — | — | — |
 
+## Parameter selection
+
+The query counts follow a conditional ordinary knowledge-soundness calculation. With `gamma = 2^-24` and query-error budget `2^-102`, the calculation sets `beta = 1 - delta + k*gamma` and `q = ceil(102 / -log2(beta))`, where `delta = min(J_gamma(J_gamma(Delta)), (Delta + k*gamma)/3) - 10^-6`, `J_gamma(x) = 1 - sqrt(1 - x*(1-gamma))`, and `Delta` is the calculated relative distance lower bound.
+
+The resulting counts do not certify 100-bit PCS round-by-round knowledge soundness or Fiat-Shamir security. The recursive distance bound and its applicability to this implementation require independent justification. For QA, the calculation additionally assumes the imported random-base-code lower bounds `d0 >= 44` for Goldilocks and `d0 >= 62` for M127. The conditional error accounting does not include the probability of a bad QA base code, and the fixed benchmark seed does not itself certify its distance.
+
 ## Implementation and reproducibility notes
 
-The RS and QA measurements use the BaseFold implementation developed for this comparison, not the HyperFold executable. Goldilocks RS uses an FFT bottom encoder; M127 RS uses direct evaluation. The QA bottom encoder and verifier use the same sampled base-field diagonal, embedded into the challenge field for verification. The setup seed is fixed for these benchmarks. The two rounds of measurements use the same build settings and hardware; timings can vary with system state.
-
-Raw benchmark files and scripts were retained in the originating workspace under `plonkish/benchmark/bench_data/basefold_mixed_2fields_20_28_20261113/` and `plonkish/benchmark/bench_data/basefold_qa_rs_extra_20261113/`. Those paths describe provenance and are not part of this repository.
+The RS and QA measurements use the optimized BaseFold implementation, not the HyperFold executable. Goldilocks RS uses an FFT bottom encoder; M127 RS uses direct evaluation. The QA bottom encoder and verifier use the same sampled base-field diagonal, embedded into the challenge field for verification. The setup seed is fixed for these benchmarks. Both measurement rounds use the same build settings and hardware; timings can vary with system state.
