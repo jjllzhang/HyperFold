@@ -111,3 +111,52 @@ fn m127_systematic_rs_matches_independent_newton_reference() {
     systematic_newton::<Mersenne127>();
     systematic_newton::<M127Quad>();
 }
+
+#[test]
+fn batch_encoding_preserves_message_boundaries_and_remainders() {
+    fn check_batches<F: SampleBase, T: ExtensionField<F>>() {
+        let mut rng = stream(&[79; 32], b"batch-encoding", 0);
+        for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+            for log in [1, 6, 8, 10] {
+                for c in [2, 4] {
+                    let cfg = HyperFoldConfig::testing(
+                        F::KIND,
+                        backend,
+                        log + 2,
+                        log,
+                        2,
+                        c,
+                        T::DIMENSION,
+                    )
+                    .unwrap();
+                    let code = BaseCodeImpl::<F>::new(cfg, &[42; 32]).unwrap();
+                    for count in [0, 1, 3, 4, 5, 7, 8] {
+                        let msg: Vec<T> = (0..count * cfg.k0())
+                            .map(|_| T::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                            .collect();
+                        let mut actual = vec![T::ZERO; count * code.n0()];
+                        code.encode_batch(&msg, &mut actual);
+                        for (input, output) in msg
+                            .chunks_exact(cfg.k0())
+                            .zip(actual.chunks_exact(code.n0()))
+                        {
+                            let mut expected = vec![T::ZERO; code.n0()];
+                            code.encode_slice(input, &mut expected);
+                            assert_eq!(
+                                output, expected,
+                                "{backend:?} log={log} c={c} count={count}"
+                            );
+                            let selected =
+                                [0, cfg.k0() - 1, cfg.k0(), code.n0() - 1].map(|j| (j, output[j]));
+                            assert!(code.check_encoded_at(input, &selected));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check_batches::<Goldilocks, Goldilocks>();
+    check_batches::<Goldilocks, p3_field::extension::CubicTrinomialExtensionField<Goldilocks>>();
+    check_batches::<Mersenne127, Mersenne127>();
+    check_batches::<Mersenne127, M127Quad>();
+}

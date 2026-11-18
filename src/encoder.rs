@@ -1,14 +1,16 @@
 //! Message blocks are natural-order contiguous subtrees. Public codeword matrices
 //! use rows (`pi[j]`, `pi[j+n_prev]`, ...) and never confuse physical/logical indices.
 use crate::{
-    base_code::{BaseCode, BaseCodeImpl},
+    base_code::BaseCodeImpl,
     matrix_h::LocalMatrix,
     params::{DiagonalTables, HyperFoldConfig},
     sampling::SampleBase,
 };
-use p3_field::{Algebra, Field};
+use p3_field::{Algebra, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use rayon::prelude::*;
+
+const FINAL_TILE_ROWS: usize = 1024;
 
 pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     config: HyperFoldConfig,
@@ -20,9 +22,7 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
 ) -> RowMajorMatrix<T> {
     assert_eq!(msg.len(), config.k0() * (1 << (depth * config.nu())));
     let mut buf = vec![T::ZERO; msg.len() * config.c];
-    buf.par_chunks_mut(base.n0())
-        .zip(msg.par_chunks(base.k0()))
-        .for_each(|(out, m)| base.encode_slice(m, out));
+    base.encode_batch(msg, &mut buf);
     if depth == 0 {
         return RowMajorMatrix::new(buf, 1);
     }
@@ -33,15 +33,51 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
         if i == depth {
             // Only the final layout change needs a second full-size output.
             let mut out = vec![T::ZERO; buf.len()];
-            out.par_chunks_exact_mut(config.r)
+            let width = T::Packing::WIDTH;
+            // H2 is too short to amortize packing and layout conversion.
+            if width == 1 || config.r == 2 {
+                out.par_chunks_exact_mut(config.r)
+                    .enumerate()
+                    .for_each(|(j, row)| {
+                        let mut x = [T::ZERO; 8];
+                        for a in 0..config.r {
+                            x[a] = buf[a * np + j];
+                        }
+                        h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
+                        row.copy_from_slice(&x[..config.r]);
+                    });
+                return RowMajorMatrix::new(out, config.r);
+            }
+            out.par_chunks_mut(FINAL_TILE_ROWS * config.r)
                 .enumerate()
-                .for_each(|(j, row)| {
-                    let mut x = [T::ZERO; 8];
-                    for a in 0..config.r {
-                        x[a] = buf[a * np + j];
+                .for_each(|(tile, rows)| {
+                    let first = tile * FINAL_TILE_ROWS;
+                    let packed_values = rows.len() / (config.r * width) * (config.r * width);
+                    let (packed, tail) = rows.split_at_mut(packed_values);
+                    for (block, dst) in packed.chunks_exact_mut(config.r * width).enumerate() {
+                        let j = first + block * width;
+                        let mut x = [T::Packing::ZERO; 8];
+                        for (a, value) in x.iter_mut().enumerate().take(config.r) {
+                            *value = *T::Packing::from_slice(&buf[a * np + j..a * np + j + width]);
+                        }
+                        forward_packed::<F, T>(
+                            h,
+                            &diag[j * (config.r - 1)..(j + width) * (config.r - 1)],
+                            &mut x,
+                        );
+                        T::transpose_rows(config.r, width, |a| x[a].as_slice(), dst);
                     }
-                    h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
-                    row.copy_from_slice(&x[..config.r]);
+                    // Small configurations may end before a full SIMD block.
+                    let first_tail = first + packed_values / config.r;
+                    for (offset, row) in tail.chunks_exact_mut(config.r).enumerate() {
+                        let j = first_tail + offset;
+                        let mut x = [T::ZERO; 8];
+                        for a in 0..config.r {
+                            x[a] = buf[a * np + j];
+                        }
+                        h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
+                        row.copy_from_slice(&x[..config.r]);
+                    }
                 });
             return RowMajorMatrix::new(out, config.r);
         }
@@ -61,7 +97,7 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
 // Each recursion owns disjoint coordinate intervals in every lane. No heap scratch
 // and no unsafe aliasing are needed; even a single large subtree exposes many tasks.
 fn butterfly_group<F: Field, T: Field + Algebra<F>>(
-    lanes: [&mut [T]; 8],
+    mut lanes: [&mut [T]; 8],
     r: usize,
     diag: &[F],
     h: &LocalMatrix<F>,
@@ -82,7 +118,23 @@ fn butterfly_group<F: Field, T: Field + Algebra<F>>(
             || butterfly_group(right, r, dr, h),
         );
     } else {
-        for j in 0..n {
+        let width = T::Packing::WIDTH;
+        let packed_len = if width > 1 && r > 2 {
+            n / width * width
+        } else {
+            0
+        };
+        for j in (0..packed_len).step_by(width) {
+            let mut x = [T::Packing::ZERO; 8];
+            for (a, value) in x.iter_mut().enumerate().take(r) {
+                *value = *T::Packing::from_slice(&lanes[a][j..j + width]);
+            }
+            forward_packed::<F, T>(h, &diag[j * (r - 1)..(j + width) * (r - 1)], &mut x);
+            for (lane, value) in lanes.iter_mut().zip(x).take(r) {
+                lane[j..j + width].copy_from_slice(value.as_slice());
+            }
+        }
+        for j in packed_len..n {
             let mut x = [T::ZERO; 8];
             for a in 0..r {
                 x[a] = lanes[a][j];
@@ -93,6 +145,18 @@ fn butterfly_group<F: Field, T: Field + Algebra<F>>(
             }
         }
     }
+}
+
+#[inline]
+fn forward_packed<F: Field, T: Field + Algebra<F>>(
+    h: &LocalMatrix<F>,
+    diag: &[F],
+    x: &mut [T::Packing; 8],
+) {
+    for (a, value) in x.iter_mut().enumerate().take(h.r).skip(1) {
+        *value *= T::Packing::from_fn(|lane| T::from(diag[lane * (h.r - 1) + a - 1]));
+    }
+    h.forward_unscaled(x);
 }
 pub fn beta<E: Field>(alpha: &[E]) -> [E; 8] {
     let r = 1 << alpha.len();
@@ -215,6 +279,7 @@ impl<F: Field, E: Field + Algebra<F>> p3_matrix::Matrix<E> for RecoveredFirstMat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base_code::BaseCode;
     use crate::{
         field_m127::{M127Quad, Mersenne127},
         params::BaseCodeKind,
@@ -367,12 +432,11 @@ mod tests {
             .map(|q| m.values[(q % n) * r + q / n])
             .collect()
     }
-    fn check<F: SampleBase, E: p3_field::ExtensionField<F>>() {
+    fn check<F: SampleBase, E: p3_field::ExtensionField<F>>(mu0: usize) {
         let mut rng = stream(&[1; 32], b"fold-test", 0);
         for r in [2usize, 4, 8] {
             for c in [2, 4] {
                 for kind in [BaseCodeKind::Rs, BaseCodeKind::Qa] {
-                    let mu0 = 2;
                     let mu = mu0 + 2 * r.ilog2() as usize;
                     let config = HyperFoldConfig::testing(F::KIND, kind, mu, mu0, r, c, 3).unwrap();
                     let diags = DiagonalTables::new(config, &[9; 32]);
@@ -436,6 +500,17 @@ mod tests {
                         out
                     }
                     assert_eq!(logical(&pi, r), naive(config, &base, &h, &diags, &msg, 2));
+                    // Depth one with mu0=1,c=2 also exercises the final scalar tail
+                    // on an eight-lane packing; depth zero has fewer than four messages.
+                    for depth in [0, 1] {
+                        let input = &msg[..config.k0() * r.pow(depth as u32)];
+                        let actual = encode_top(config, &base, &h, &diags, input, depth);
+                        let width = if depth == 0 { 1 } else { r };
+                        assert_eq!(
+                            logical(&actual, width),
+                            naive(config, &base, &h, &diags, input, depth)
+                        );
+                    }
                     if c == 2
                         && ((r == 4 && kind == BaseCodeKind::Rs)
                             || (r == 2 && kind == BaseCodeKind::Qa))
@@ -505,13 +580,16 @@ mod tests {
                 }
             }
         }
+        check_large::<Goldilocks, Goldilocks>();
         check_large::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
         check_large::<Mersenne127, M127Quad>();
     }
     #[test]
     fn encoder_and_fold_match_naive() {
-        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
-        check::<Mersenne127, M127Quad>();
+        for mu0 in [1, 2] {
+            check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>(mu0);
+            check::<Mersenne127, M127Quad>(mu0);
+        }
     }
     #[test]
     fn r4_fold_formula_encoding_and_recovered_rows() {

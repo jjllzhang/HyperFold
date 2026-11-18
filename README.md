@@ -55,6 +55,30 @@ Both benchmark commands default to `--matrix specialized` (fixed H₂, H₄ and 
 
 The Python runner writes general results to `OUTPUT_DIR/general/`; pass that directory as `--input-dir` when plotting them. Use a fresh `--output-dir` for new runs to avoid mixing measurements.
 
+For RS encoding and thread scaling, the focused example reports raw samples for
+base encoding, complete recursive encoding, and `commit` separately:
+
+```sh
+RUSTFLAGS="-C target-cpu=native" cargo build --release --example bench_encoding
+target/release/examples/bench_encoding \
+  --fields goldilocks --mu 20 --r 8 --c 2 --threads 32 --repetitions 5 > encoding.csv
+```
+
+It times each phase separately, runs one warm-up per phase and configuration, and
+excludes Setup, input generation, witness copies, and output destruction from the
+timers. Base encoding reuses its
+output buffer; complete encoding includes allocation and the final layout change.
+The CSV includes commitment roots so before/after runs can check identical output.
+Use the same CPU affinity for both versions when comparing measurements.
+Run each configuration and version in a fresh process to avoid allocator state
+carrying over from other configurations. The filters also accept comma-separated
+lists for exploratory sweeps.
+
+The [encoding optimization measurements](results/encoding-optimization/summary.csv)
+include median speedups and raw samples in the same directory.
+[Metadata](results/encoding-optimization/metadata.json) records the baseline revision,
+build flags, CPU affinity, timing scope, and harness adaptation for the older API.
+
 ## Results and figures
 
 Recorded 32-thread measurements (AMD EPYC 9754; timings in `ms`, `proof_bytes` in bytes) are included in `results/`:
