@@ -1,0 +1,65 @@
+{
+  "created_utc": "2026-11-18T11:10:41.898064+00:00",
+  "baseline_revision": "cf4b3e25cb3dc61036668f71ef7b8d619b82c522",
+  "optimized_revision": "2bb0cc926a541b9b453a08a60fa3329b9b881b4e",
+  "cpu": "AMD EPYC 9754 128-Core Processor",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "rustflags": "-C target-cpu=native",
+  "profile": {
+    "name": "release",
+    "lto": "thin",
+    "codegen_units": 1
+  },
+  "build_isolation": "Separate Cargo target directories for baseline, optimized native, and optimized scalar builds.",
+  "binary_sha256": {
+    "baseline": "f105d761e3f9453075cbbfad2c732fa5e0cd0e2d6d19911b839d429203f76010",
+    "optimized": "10e94fc17614040a8d3e9b0cc15db24e803b8a41e84a5ae94e3f7cd4df0cef2e"
+  },
+  "cargo_lock_sha256": "5f6bbc3d17e6753559072b8f4ee92273dcc299695398accb23977dfd3447147c",
+  "source_sha256": {
+    "src/base_code.rs": "5ec63702b144226bbc2347af15dd69ae9c04a2b2b58db2ab18e0fedc2fbdd120",
+    "src/encoder.rs": "c5ce952cead4059c1126349636ad652f72b817637ded34a53b77fc57ac9279c9",
+    "src/matrix_h.rs": "340306e8d631f965f98638a7b1eb6bede9caca6b86d86d7757f7d4ad3bb73a16",
+    "examples/bench_encoding.rs": "8aec54eb9d49df673e205e24859d39185f2d9c224f6ca509ff6e8f298ed22bb7"
+  },
+  "baseline_harness_sha256": "4727a797fa5f7126e924e1f08a6e8d75269480769b3cb0cce16c63f151945a32",
+  "baseline_harness_adaptation": "Same phase-separated benchmark, with the base phase using the old API: base_output.par_chunks_mut(pcs.base.n0()).zip(message.par_chunks(pcs.base.k0())).for_each(|(output,input)| pcs.base.encode_slice(input,output)).",
+  "mu": 20,
+  "message_elements": 1048576,
+  "cpu_affinity": {
+    "1": "0",
+    "32": "0-31"
+  },
+  "warmups_per_phase_per_configuration": 1,
+  "samples_per_phase": {
+    "1": 3,
+    "32": 5
+  },
+  "aggregation": "Median per phase and configuration; speedup = median baseline / median optimized.",
+  "timing_scope": {
+    "base": "All base codewords; output buffer allocation is excluded. Baseline uses one message per parallel iterator item; optimized Lagrange encoding uses four, while FFT retains one.",
+    "encode": "Complete encode_top, including allocation and final layout change; destruction of returned output is excluded.",
+    "commit": "Public HyperFoldPcs::commit, including encoding, Merkle tree and evaluation; witness cloning and destruction of returned data are excluded."
+  },
+  "setup": "One setup and one fixed message per configuration, outside all timers; each phase is measured separately.",
+  "simd": "Goldilocks packing width 8 with native flags. H4/H8 use packing; H2 retains scalar evaluation. M127 and extension-valued Field::Packing width 1 use scalar evaluation.",
+  "configurations": 22,
+  "correctness": "All before/after commitment roots match, including across thread counts for matching configurations. Frozen proof bytes and independent Newton/matrix checks pass.",
+  "checks": {
+    "native_release_tests": 45,
+    "scalar_x86_64_release_tests": 45,
+    "rustfmt": "passed",
+    "clippy_perf": "passed; pre-existing style warnings remain"
+  },
+  "notes": [
+    "Local measurements at mu=20; speedups are not guarantees for other CPUs or message sizes.",
+    "Single-thread measurements cover r=2,4,8 for Goldilocks and r=2,8 for M127. 32-thread measurements cover r=2,4,8 for both fields.",
+    "A Goldilocks r=4,c=2 outlier in the initial 32-thread sweep was allocator-sensitive. All saved 32-thread samples were replaced with fresh-process measurements for every configuration.",
+    "Goldilocks r=2 has no measured benefit and shows about 2-3% slower complete encoding despite retaining scalar H2. Gains depend on configuration; the full signed results are retained in summary.csv.",
+    "These samples describe the optimized revision above, before integrating PR #17 (master f7ff2af). That later integration adds fused subtrees, uninitialized buffers, and native M127 packing width 4. The recorded speedups and source hashes are historical and do not measure the combined implementation."
+  ],
+  "process_isolation": {
+    "32": "Each (field,r,c) configuration runs in its own fresh process; baseline and optimized are run consecutively per configuration.",
+    "1": "r=2,8 run in one process per version, with Goldilocks followed by M127; Goldilocks r=4 runs separately per version."
+  }
+}

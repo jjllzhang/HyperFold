@@ -4,7 +4,10 @@ use crate::{
     params::{BaseCodeKind, Error, HyperFoldConfig, Result},
     sampling::{SampleBase, nonzero, stream},
 };
-use p3_field::{Algebra, Field, PackedValue, batch_multiplicative_inverse};
+use p3_field::{
+    Algebra, Field, PackedValue, PrimeCharacteristicRing, batch_multiplicative_inverse,
+};
+use rayon::prelude::*;
 
 /// Transform in natural Walsh character order; in odd characteristic H²=nI.
 pub fn wht_in_place<T: Field>(buf: &mut [T]) {
@@ -57,6 +60,7 @@ enum Encoder<F> {
         twiddles: Vec<Vec<F>>,
     },
     Lagrange {
+        // Sparse coordinate checks still use these rows; full encoding uses differences.
         parity_transposed: Vec<F>,
     },
 }
@@ -192,15 +196,88 @@ impl<F: Field> BaseCode<F> for BaseCodeImpl<F> {
                     half *= 2;
                 }
             }
-            Encoder::Lagrange { parity_transposed } => {
-                out[..self.k0].copy_from_slice(msg);
-                for (v, row) in out[self.k0..]
-                    .iter_mut()
-                    .zip(parity_transposed.chunks_exact(self.k0))
-                {
-                    *v = msg.iter().zip(row).map(|(&a, &b)| a * b).sum();
-                }
+            Encoder::Lagrange { .. } => encode_finite_differences::<T, 1>(msg, out, self.k0),
+        }
+    }
+}
+
+impl<F: Field> BaseCodeImpl<F> {
+    /// Encode whole consecutive messages into consecutive codewords.
+    /// Parallel tasks process four Lagrange messages or one QA/FFT message at a time.
+    pub fn encode_batch<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]) {
+        assert!(msg.len().is_multiple_of(self.k0));
+        assert_eq!(out.len(), msg.len() / self.k0 * self.n0());
+        let batch_size = if matches!(self.encoder, Encoder::Lagrange { .. }) {
+            4
+        } else {
+            1
+        };
+        msg.par_chunks(batch_size * self.k0)
+            .zip(out.par_chunks_mut(batch_size * self.n0()))
+            .for_each(|(input, output)| self.encode_batch_serial(input, output));
+    }
+
+    /// Reuse batching inside a subtree that already belongs to one parallel task.
+    pub(crate) fn encode_batch_serial<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]) {
+        assert!(msg.len().is_multiple_of(self.k0));
+        assert_eq!(out.len(), msg.len() / self.k0 * self.n0());
+        if matches!(self.encoder, Encoder::Lagrange { .. }) {
+            // Four independent difference chains expose instruction-level parallelism.
+            msg.chunks(4 * self.k0)
+                .zip(out.chunks_mut(4 * self.n0()))
+                .for_each(|(input, output)| {
+                    if input.len() == 4 * self.k0 {
+                        encode_finite_differences::<T, 4>(input, output, self.k0);
+                    } else {
+                        for (message, codeword) in input
+                            .chunks_exact(self.k0)
+                            .zip(output.chunks_exact_mut(self.n0()))
+                        {
+                            self.encode_slice(message, codeword);
+                        }
+                    }
+                });
+        } else {
+            msg.chunks_exact(self.k0)
+                .zip(out.chunks_exact_mut(self.n0()))
+                .for_each(|(input, output)| self.encode_slice(input, output));
+        }
+    }
+}
+
+fn encode_finite_differences<T: PrimeCharacteristicRing + Copy, const BATCH: usize>(
+    msg: &[T],
+    out: &mut [T],
+    k: usize,
+) {
+    let n = out.len() / BATCH;
+    let mut differences = vec![[T::ZERO; BATCH]; k];
+    for (column, (input, output)) in msg.chunks_exact(k).zip(out.chunks_exact_mut(n)).enumerate() {
+        output[..k].copy_from_slice(input);
+        for (difference, &value) in differences.iter_mut().zip(input) {
+            difference[column] = value;
+        }
+    }
+    // Keep the right edge of the difference table, highest order first.
+    // Its final entry is f(k-1); all operations remain exact in the message field.
+    for order in 1..k {
+        for j in 0..k - order {
+            let next = differences[j + 1];
+            for (value, next_value) in differences[j].iter_mut().zip(next) {
+                *value = next_value - *value;
             }
+        }
+    }
+    // A prefix sum advances the edge by one integer point, producing f(k), f(k+1), ...
+    for j in k..n {
+        for a in 1..k {
+            let previous = differences[a - 1];
+            for (value, increment) in differences[a].iter_mut().zip(previous) {
+                *value += increment;
+            }
+        }
+        for column in 0..BATCH {
+            out[column * n + j] = differences[k - 1][column];
         }
     }
 }

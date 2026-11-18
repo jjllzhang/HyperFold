@@ -1,5 +1,5 @@
 //! Specialized local matrices and a general symmetric Pascal alternative.
-use p3_field::{Algebra, Field};
+use p3_field::{Algebra, Field, PrimeCharacteristicRing};
 /// Local matrix family. Legacy is retained for historical proof reproduction.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MatrixKind {
@@ -66,6 +66,11 @@ impl<F: Field> LocalMatrix<F> {
         for a in 1..self.r {
             x[a] *= diag[a - 1];
         }
+        self.forward_unscaled(x);
+    }
+    /// The same circuit serves scalar and SIMD values after diagonal scaling.
+    #[inline]
+    pub(crate) fn forward_unscaled<T: PrimeCharacteristicRing + Copy>(&self, x: &mut [T; 8]) {
         match (self.kind, self.r) {
             (MatrixKind::General, _) | (MatrixKind::Legacy, 8) => {
                 pascal_upper(x, self.r, false);
@@ -114,7 +119,7 @@ impl<F: Field> LocalMatrix<F> {
         }
     }
 }
-fn h4_forward<F: Field>(x: &mut [F; 8]) {
+fn h4_forward<F: PrimeCharacteristicRing + Copy>(x: &mut [F; 8]) {
     x[2] = x[2] + x[3];
     x[0] = x[0] + x[1].double();
     x[3] = x[3] - x[0];
@@ -138,7 +143,7 @@ fn h4_inverse<F: Field>(x: &mut [F; 8]) {
 }
 
 #[inline(always)]
-fn h8_forward<F: Field>(x: &mut [F; 8]) {
+fn h8_forward<F: PrimeCharacteristicRing + Copy>(x: &mut [F; 8]) {
     x[6] = x[6] - x[5];
     x[2] = x[2] + x[1];
     x[5] = x[5] - x[4];
@@ -211,7 +216,7 @@ fn legacy_h4_inverse<T: Field>(x: &mut [T; 8]) {
     let x3 = b - h;
     x[..4].copy_from_slice(&[x0, x1, x2, x3]);
 }
-fn pascal_lower<T: Field>(x: &mut [T; 8], r: usize, inverse: bool) {
+fn pascal_lower<T: PrimeCharacteristicRing + Copy>(x: &mut [T; 8], r: usize, inverse: bool) {
     if inverse {
         for stage in (0..r - 1).rev() {
             for j in stage + 1..r {
@@ -226,7 +231,7 @@ fn pascal_lower<T: Field>(x: &mut [T; 8], r: usize, inverse: bool) {
         }
     }
 }
-fn pascal_upper<T: Field>(x: &mut [T; 8], r: usize, inverse: bool) {
+fn pascal_upper<T: PrimeCharacteristicRing + Copy>(x: &mut [T; 8], r: usize, inverse: bool) {
     if inverse {
         for stage in 0..r - 1 {
             for j in (stage + 1..r).rev() {
