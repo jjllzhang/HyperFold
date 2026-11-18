@@ -1,7 +1,7 @@
 //! Message blocks are natural-order contiguous subtrees. Public codeword matrices
 //! use rows (`pi[j]`, `pi[j+n_prev]`, ...) and never confuse physical/logical indices.
 use crate::{
-    base_code::BaseCodeImpl,
+    base_code::{BaseCode, BaseCodeImpl},
     matrix_h::LocalMatrix,
     params::{DiagonalTables, HyperFoldConfig},
     sampling::SampleBase,
@@ -11,6 +11,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use rayon::prelude::*;
 
 const FINAL_TILE_ROWS: usize = 1024;
+const FUSED_SUBTREE_BYTES: usize = 512 * 1024;
 
 pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     config: HyperFoldConfig,
@@ -21,22 +22,90 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     depth: usize,
 ) -> RowMajorMatrix<T> {
     assert_eq!(msg.len(), config.k0() * (1 << (depth * config.nu())));
-    let mut buf = vec![T::ZERO; msg.len() * config.c];
-    base.encode_batch(msg, &mut buf);
+    assert_eq!(base.k0(), config.k0());
+    assert_eq!(base.c, config.c);
+    let len = msg
+        .len()
+        .checked_mul(config.c)
+        .expect("encoded message length overflow");
+    let base_len = base
+        .k0()
+        .checked_mul(base.c)
+        .expect("base codeword length overflow");
+    // Finish the bottom levels while each disjoint subtree remains in cache.
+    // Leave the final level to the physical-layout conversion below.
+    // Keep enough independent subtrees for work stealing on small inputs.
+    let min_subtrees = 8 * rayon::current_num_threads();
+    let max_subtree_len = len / min_subtrees;
+    let mut fused_depth = 0;
+    while fused_depth + 1 < depth
+        && config.n(fused_depth + 1) * core::mem::size_of::<T>() <= FUSED_SUBTREE_BYTES
+        && config.n(fused_depth + 1) <= max_subtree_len
+    {
+        fused_depth += 1;
+    }
+    let tile_len = config.n(fused_depth);
+    // These shape checks ensure that the zipped passes below initialize every slot.
+    assert!(tile_len > 0 && tile_len.is_multiple_of(base_len));
+    assert!(len.is_multiple_of(tile_len));
+    let scratch_len = tile_len.min(4 * base_len);
+    let mut buf: Vec<T> = Vec::with_capacity(len);
+    buf.spare_capacity_mut()[..len]
+        .par_chunks_mut(tile_len)
+        .zip(msg.par_chunks(tile_len / config.c))
+        .for_each_init(
+            || vec![T::ZERO; scratch_len],
+            |scratch, (uninitialized, message)| {
+                // BaseCode needs initialized values. Reuse at most four base blocks
+                // so Lagrange differences stay batched without clearing the full output.
+                for (out, m) in uninitialized
+                    .chunks_mut(scratch_len)
+                    .zip(message.chunks(scratch_len / config.c))
+                {
+                    let initialized = &mut scratch[..out.len()];
+                    base.encode_batch_serial(m, initialized);
+                    out.write_copy_of_slice(initialized);
+                }
+                // SAFETY: the checked shapes ensure that all base blocks above
+                // cover this subtree and each slot was written. This task owns
+                // the entire disjoint subtree.
+                let subtree = unsafe { uninitialized.assume_init_mut() };
+                for level in 1..=fused_depth {
+                    let lane_len = config.n(level - 1);
+                    let diag = &diags.levels[level - 1].forward;
+                    for group in subtree.chunks_exact_mut(config.r * lane_len) {
+                        let mut lanes: [&mut [T]; 8] =
+                            core::array::from_fn(|_| -> &mut [T] { &mut [] });
+                        let mut remaining = group;
+                        for lane in lanes.iter_mut().take(config.r) {
+                            let (head, tail) = remaining.split_at_mut(lane_len);
+                            *lane = head;
+                            remaining = tail;
+                        }
+                        butterfly_group(lanes, config.r, diag, h);
+                    }
+                }
+            },
+        );
+    // SAFETY: all len slots were initialized before the parallel pass returned.
+    // If a task panics, buf keeps length zero. T is Copy and has no destructor.
+    unsafe { buf.set_len(len) };
     if depth == 0 {
         return RowMajorMatrix::new(buf, 1);
     }
-    for i in 1..=depth {
+    for i in fused_depth + 1..=depth {
         let np = config.n(i - 1);
         let ni = config.r * np;
         let diag = &diags.levels[i - 1].forward;
         if i == depth {
             // Only the final layout change needs a second full-size output.
-            let mut out = vec![T::ZERO; buf.len()];
+            assert!(buf.len().is_multiple_of(config.r));
+            let mut out: Vec<T> = Vec::with_capacity(buf.len());
             let width = T::Packing::WIDTH;
             // H2 is too short to amortize packing and layout conversion.
             if width == 1 || config.r == 2 {
-                out.par_chunks_exact_mut(config.r)
+                out.spare_capacity_mut()[..buf.len()]
+                    .par_chunks_exact_mut(config.r)
                     .enumerate()
                     .for_each(|(j, row)| {
                         let mut x = [T::ZERO; 8];
@@ -44,41 +113,58 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
                             x[a] = buf[a * np + j];
                         }
                         h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
-                        row.copy_from_slice(&x[..config.r]);
+                        row.write_copy_of_slice(&x[..config.r]);
                     });
-                return RowMajorMatrix::new(out, config.r);
+            } else {
+                out.spare_capacity_mut()[..buf.len()]
+                    .par_chunks_mut(FINAL_TILE_ROWS * config.r)
+                    .enumerate()
+                    .for_each_init(
+                        || vec![T::ZERO; config.r * width],
+                        |scratch, (tile, rows)| {
+                            let first = tile * FINAL_TILE_ROWS;
+                            let packed_values =
+                                rows.len() / (config.r * width) * (config.r * width);
+                            let (packed, tail) = rows.split_at_mut(packed_values);
+                            for (block, dst) in
+                                packed.chunks_exact_mut(config.r * width).enumerate()
+                            {
+                                let j = first + block * width;
+                                let mut x = [T::Packing::ZERO; 8];
+                                for (a, value) in x.iter_mut().enumerate().take(config.r) {
+                                    *value = *T::Packing::from_slice(
+                                        &buf[a * np + j..a * np + j + width],
+                                    );
+                                }
+                                forward_packed::<F, T>(
+                                    h,
+                                    &diag[j * (config.r - 1)..(j + width) * (config.r - 1)],
+                                    &mut x,
+                                );
+                                T::transpose_rows(config.r, width, |a| x[a].as_slice(), scratch);
+                                dst.write_copy_of_slice(scratch);
+                            }
+                            // Small configurations may end before a full SIMD block.
+                            let first_tail = first + packed_values / config.r;
+                            for (offset, row) in tail.chunks_exact_mut(config.r).enumerate() {
+                                let j = first_tail + offset;
+                                let mut x = [T::ZERO; 8];
+                                for a in 0..config.r {
+                                    x[a] = buf[a * np + j];
+                                }
+                                h.forward(
+                                    &mut x,
+                                    &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)],
+                                );
+                                row.write_copy_of_slice(&x[..config.r]);
+                            }
+                        },
+                    );
             }
-            out.par_chunks_mut(FINAL_TILE_ROWS * config.r)
-                .enumerate()
-                .for_each(|(tile, rows)| {
-                    let first = tile * FINAL_TILE_ROWS;
-                    let packed_values = rows.len() / (config.r * width) * (config.r * width);
-                    let (packed, tail) = rows.split_at_mut(packed_values);
-                    for (block, dst) in packed.chunks_exact_mut(config.r * width).enumerate() {
-                        let j = first + block * width;
-                        let mut x = [T::Packing::ZERO; 8];
-                        for (a, value) in x.iter_mut().enumerate().take(config.r) {
-                            *value = *T::Packing::from_slice(&buf[a * np + j..a * np + j + width]);
-                        }
-                        forward_packed::<F, T>(
-                            h,
-                            &diag[j * (config.r - 1)..(j + width) * (config.r - 1)],
-                            &mut x,
-                        );
-                        T::transpose_rows(config.r, width, |a| x[a].as_slice(), dst);
-                    }
-                    // Small configurations may end before a full SIMD block.
-                    let first_tail = first + packed_values / config.r;
-                    for (offset, row) in tail.chunks_exact_mut(config.r).enumerate() {
-                        let j = first_tail + offset;
-                        let mut x = [T::ZERO; 8];
-                        for a in 0..config.r {
-                            x[a] = buf[a * np + j];
-                        }
-                        h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
-                        row.copy_from_slice(&x[..config.r]);
-                    }
-                });
+            // SAFETY: rows and packed blocks cover all buf.len() slots, including
+            // scalar tails. Every slot was written before this pass returned.
+            // On panic out has len 0.
+            unsafe { out.set_len(buf.len()) };
             return RowMajorMatrix::new(out, config.r);
         }
         buf.par_chunks_exact_mut(ni).for_each(|group| {
@@ -279,14 +365,92 @@ impl<F: Field, E: Field + Algebra<F>> p3_matrix::Matrix<E> for RecoveredFirstMat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_code::BaseCode;
     use crate::{
         field_m127::{M127Quad, Mersenne127},
         params::BaseCodeKind,
         sampling::{SampleBase, stream},
     };
-    use p3_field::extension::CubicTrinomialExtensionField;
+    use p3_field::{PrimeCharacteristicRing, extension::CubicTrinomialExtensionField};
     use p3_goldilocks::Goldilocks;
+
+    #[test]
+    fn depth_zero_encoding_initializes_the_complete_base_codeword() {
+        fn check<F: SampleBase, T: p3_field::ExtensionField<F>>() {
+            for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                for c in [2, 4] {
+                    let config =
+                        HyperFoldConfig::testing(F::KIND, backend, 6, 3, 2, c, T::DIMENSION)
+                            .unwrap();
+                    let base = BaseCodeImpl::<F>::new(config, &[42; 32]).unwrap();
+                    let h = LocalMatrix::new(config.r);
+                    let diags = DiagonalTables::new(config, &[42; 32]);
+                    let mut rng = stream(&[27; 32], b"base-only-encoding", 0);
+                    let message: Vec<T> = (0..base.k0())
+                        .map(|_| T::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                        .collect();
+                    let mut expected = vec![T::ZERO; base.n0()];
+                    base.encode_slice(&message, &mut expected);
+                    let actual = encode_top(config, &base, &h, &diags, &message, 0);
+                    assert_eq!(actual.width, 1);
+                    assert_eq!(actual.values, expected);
+                }
+            }
+        }
+        check::<Goldilocks, Goldilocks>();
+        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check::<Mersenne127, Mersenne127>();
+        check::<Mersenne127, M127Quad>();
+    }
+
+    #[test]
+    fn encoding_rejects_mismatched_base_shapes() {
+        let config =
+            HyperFoldConfig::testing(Goldilocks::KIND, BaseCodeKind::Qa, 10, 3, 2, 2, 3).unwrap();
+        let h = LocalMatrix::new(config.r);
+        let diags = DiagonalTables::new(config, &[42; 32]);
+        let message = vec![Goldilocks::ONE; config.k()];
+        for incompatible in [
+            HyperFoldConfig { c: 4, ..config },
+            HyperFoldConfig { mu0: 4, ..config },
+        ] {
+            let base = BaseCodeImpl::new(incompatible, &[42; 32]).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| {
+                    encode_top(config, &base, &h, &diags, &message, config.depth())
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_unwinds_when_fused_or_final_diagonals_are_truncated() {
+        let config =
+            HyperFoldConfig::testing(Goldilocks::KIND, BaseCodeKind::Qa, 10, 3, 2, 2, 3).unwrap();
+        let base = BaseCodeImpl::new(config, &[42; 32]).unwrap();
+        let h = LocalMatrix::new(config.r);
+        let message = vec![Goldilocks::ONE; config.k()];
+        for threads in [1, 4] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    for level in [0, config.depth() - 1] {
+                        let mut diags = DiagonalTables::new(config, &[42; 32]);
+                        // Permit the first coordinate, then panic after partial writes.
+                        diags.levels[level].forward.truncate(config.r - 1);
+                        assert!(
+                            std::panic::catch_unwind(|| {
+                                encode_top(config, &base, &h, &diags, &message, config.depth())
+                            })
+                            .is_err()
+                        );
+                    }
+                });
+        }
+    }
+
     #[test]
     fn recovered_first_rows_match_dense_and_only_queries_are_read() {
         use p3_field::ExtensionField;
@@ -582,7 +746,79 @@ mod tests {
         }
         check_large::<Goldilocks, Goldilocks>();
         check_large::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check_large::<Mersenne127, Mersenne127>();
         check_large::<Mersenne127, M127Quad>();
+    }
+    #[test]
+    fn fused_packed_encoding_matches_scalar_layers() {
+        fn check<F: SampleBase>() {
+            let mut rng = stream(&[83; 32], b"fused-packed-encoding", 0);
+            for r in [2usize, 4, 8] {
+                for c in [2, 4] {
+                    for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                        for kind in [
+                            crate::matrix_h::MatrixKind::Specialized,
+                            crate::matrix_h::MatrixKind::General,
+                            crate::matrix_h::MatrixKind::Legacy,
+                        ] {
+                            let depth = 4;
+                            let config = HyperFoldConfig::testing(
+                                F::KIND,
+                                backend,
+                                1 + depth * r.ilog2() as usize,
+                                1,
+                                r,
+                                c,
+                                3,
+                            )
+                            .unwrap();
+                            let base = BaseCodeImpl::<F>::new(config, &[42; 32]).unwrap();
+                            let h = LocalMatrix::with_kind(r, kind);
+                            let diags = DiagonalTables::new(config, &[42; 32]);
+                            let message: Vec<F> =
+                                (0..config.k()).map(|_| F::sample(&mut rng)).collect();
+                            let mut expected = vec![F::ZERO; config.k() * c];
+                            for (input, output) in message
+                                .chunks_exact(base.k0())
+                                .zip(expected.chunks_exact_mut(base.n0()))
+                            {
+                                base.encode_slice(input, output);
+                            }
+                            // The unfused scalar map is independent of packing, tile
+                            // initialization, and the final physical transposition.
+                            for level in 1..=depth {
+                                let n = config.n(level - 1);
+                                let diag = &diags.levels[level - 1].forward;
+                                for group in expected.chunks_exact_mut(r * n) {
+                                    for j in 0..n {
+                                        let mut x = [F::ZERO; 8];
+                                        for a in 0..r {
+                                            x[a] = group[a * n + j];
+                                        }
+                                        h.forward(&mut x, &diag[j * (r - 1)..(j + 1) * (r - 1)]);
+                                        for a in 0..r {
+                                            group[a * n + j] = x[a];
+                                        }
+                                    }
+                                }
+                            }
+                            for threads in [1, 4] {
+                                let actual = rayon::ThreadPoolBuilder::new()
+                                    .num_threads(threads)
+                                    .build()
+                                    .unwrap()
+                                    .install(|| {
+                                        encode_top(config, &base, &h, &diags, &message, depth)
+                                    });
+                                assert_eq!(logical(&actual, r), expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        check::<Goldilocks>();
+        check::<Mersenne127>();
     }
     #[test]
     fn encoder_and_fold_match_naive() {

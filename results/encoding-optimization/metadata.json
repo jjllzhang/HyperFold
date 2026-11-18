@@ -1,7 +1,7 @@
 {
   "created_utc": "2026-11-18T11:10:41.898064+00:00",
   "baseline_revision": "cf4b3e25cb3dc61036668f71ef7b8d619b82c522",
-  "optimized_revision": "working tree",
+  "optimized_revision": "2bb0cc926a541b9b453a08a60fa3329b9b881b4e",
   "cpu": "AMD EPYC 9754 128-Core Processor",
   "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
   "rustflags": "-C target-cpu=native",
@@ -55,7 +55,8 @@
     "Local measurements at mu=20; speedups are not guarantees for other CPUs or message sizes.",
     "Single-thread measurements cover r=2,4,8 for Goldilocks and r=2,8 for M127. 32-thread measurements cover r=2,4,8 for both fields.",
     "A Goldilocks r=4,c=2 outlier in the initial 32-thread sweep was allocator-sensitive. All saved 32-thread samples were replaced with fresh-process measurements for every configuration.",
-    "Goldilocks r=2 has no measured benefit and shows about 2-3% slower complete encoding despite retaining scalar H2. Gains depend on configuration; the full signed results are retained in summary.csv."
+    "Goldilocks r=2 has no measured benefit and shows about 2-3% slower complete encoding despite retaining scalar H2. Gains depend on configuration; the full signed results are retained in summary.csv.",
+    "These samples describe the optimized revision above, before integrating PR #17 (master f7ff2af). That later integration adds fused subtrees, uninitialized buffers, and native M127 packing width 4. The recorded speedups and source hashes are historical and do not measure the combined implementation."
   ],
   "process_isolation": {
     "32": "Each (field,r,c) configuration runs in its own fresh process; baseline and optimized are run consecutively per configuration.",

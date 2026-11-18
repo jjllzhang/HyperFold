@@ -1,5 +1,6 @@
-//! Canonical scalar M127 arithmetic, with Plonky3's quadratic power basis X²+1.
-//! This implementation is not claimed constant-time. No SIMD representation is assumed.
+//! Canonical M127 arithmetic, with Plonky3's quadratic power basis X²+1.
+//! Native AVX-512/IFMA builds also expose four-lane packed arithmetic.
+//! This implementation is not claimed constant-time.
 use core::{
     fmt,
     iter::{Product, Sum},
@@ -12,6 +13,23 @@ use p3_field::extension::{
 use p3_field::integers::QuotientMap;
 use p3_field::{Field, Packable, PrimeCharacteristicRing, PrimeField, RawDataSerializable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    target_feature = "avx512dq",
+    target_feature = "avx512vl",
+    target_feature = "avx512ifma"
+))]
+mod packed_avx512;
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    target_feature = "avx512dq",
+    target_feature = "avx512vl",
+    target_feature = "avx512ifma"
+))]
+pub use packed_avx512::PackedMersenne127AVX512;
 
 pub const P: u128 = (1u128 << 127) - 1;
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -145,6 +163,21 @@ impl RawDataSerializable for Mersenne127 {
     }
 }
 impl Field for Mersenne127 {
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl",
+        target_feature = "avx512ifma"
+    ))]
+    type Packing = PackedMersenne127AVX512;
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512dq",
+        target_feature = "avx512vl",
+        target_feature = "avx512ifma"
+    )))]
     type Packing = Self;
     // Sage GF(2^127-1).multiplicative_generator(), order checked in tests.
     const GENERATOR: Self = Self(43);

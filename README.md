@@ -30,8 +30,12 @@ Cargo fetches [Plonky3](https://github.com/Plonky3/Plonky3) at the revision pinn
 
 ```sh
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin bench
-cargo test --release -- --test-threads=1
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --test-threads=1
 ```
+
+Native x86-64 builds with AVX-512F/DQ/VL/IFMA use four-lane M127 packing; other targets use scalar M127 arithmetic.
+
+Encoding writes into uninitialized output buffers in parallel, using a small reusable base-block scratch instead of clearing each full buffer. Base encoding is fused with the bottom encoding layers in subtrees of up to 512 KiB. Smaller inputs use smaller subtrees to keep enough parallel tasks for work stealing. The final layer writes the public row layout separately.
 
 To use a clean local Plonky3 checkout at the pinned revision instead, run `python3 scripts/configure_plonky3.py /path/to/Plonky3`. This changes `Cargo.toml` to use local paths; Cargo will update the lockfile on the next build.
 
@@ -78,6 +82,9 @@ The [encoding optimization measurements](results/encoding-optimization/summary.c
 include median speedups and raw samples in the same directory.
 [Metadata](results/encoding-optimization/metadata.json) records the baseline revision,
 build flags, CPU affinity, timing scope, and harness adaptation for the older API.
+These measurements compare `cf4b3e2` with `2bb0cc9`, before the integration of
+PR #17's fused subtrees, uninitialized buffers, and M127 packing. They do not
+measure the combined implementation.
 
 ## Results and figures
 

@@ -207,10 +207,24 @@ impl<F: Field> BaseCodeImpl<F> {
     pub fn encode_batch<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]) {
         assert!(msg.len().is_multiple_of(self.k0));
         assert_eq!(out.len(), msg.len() / self.k0 * self.n0());
+        let batch_size = if matches!(self.encoder, Encoder::Lagrange { .. }) {
+            4
+        } else {
+            1
+        };
+        msg.par_chunks(batch_size * self.k0)
+            .zip(out.par_chunks_mut(batch_size * self.n0()))
+            .for_each(|(input, output)| self.encode_batch_serial(input, output));
+    }
+
+    /// Reuse batching inside a subtree that already belongs to one parallel task.
+    pub(crate) fn encode_batch_serial<T: Field + Algebra<F>>(&self, msg: &[T], out: &mut [T]) {
+        assert!(msg.len().is_multiple_of(self.k0));
+        assert_eq!(out.len(), msg.len() / self.k0 * self.n0());
         if matches!(self.encoder, Encoder::Lagrange { .. }) {
             // Four independent difference chains expose instruction-level parallelism.
-            msg.par_chunks(4 * self.k0)
-                .zip(out.par_chunks_mut(4 * self.n0()))
+            msg.chunks(4 * self.k0)
+                .zip(out.chunks_mut(4 * self.n0()))
                 .for_each(|(input, output)| {
                     if input.len() == 4 * self.k0 {
                         encode_finite_differences::<T, 4>(input, output, self.k0);
@@ -224,8 +238,8 @@ impl<F: Field> BaseCodeImpl<F> {
                     }
                 });
         } else {
-            msg.par_chunks_exact(self.k0)
-                .zip(out.par_chunks_exact_mut(self.n0()))
+            msg.chunks_exact(self.k0)
+                .zip(out.chunks_exact_mut(self.n0()))
                 .for_each(|(input, output)| self.encode_slice(input, output));
         }
     }
