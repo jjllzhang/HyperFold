@@ -10,6 +10,8 @@ use p3_field::{Algebra, Field};
 use p3_matrix::dense::RowMajorMatrix;
 use rayon::prelude::*;
 
+const FUSED_SUBTREE_BYTES: usize = 512 * 1024;
+
 pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     config: HyperFoldConfig,
     base: &BaseCodeImpl<F>,
@@ -19,21 +21,86 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
     depth: usize,
 ) -> RowMajorMatrix<T> {
     assert_eq!(msg.len(), config.k0() * (1 << (depth * config.nu())));
-    let mut buf = vec![T::ZERO; msg.len() * config.c];
-    buf.par_chunks_mut(base.n0())
-        .zip(msg.par_chunks(base.k0()))
-        .for_each(|(out, m)| base.encode_slice(m, out));
+    assert_eq!(base.k0(), config.k0());
+    assert_eq!(base.c, config.c);
+    let len = msg
+        .len()
+        .checked_mul(config.c)
+        .expect("encoded message length overflow");
+    let base_len = base
+        .k0()
+        .checked_mul(base.c)
+        .expect("base codeword length overflow");
+    // Finish the bottom levels while each disjoint subtree remains in cache.
+    // Leave the final level to the unchanged physical-layout conversion below.
+    // Keep enough independent subtrees for work stealing on small inputs.
+    let min_subtrees = 8 * rayon::current_num_threads();
+    let max_subtree_len = len / min_subtrees;
+    let mut fused_depth = 0;
+    while fused_depth + 1 < depth
+        && config.n(fused_depth + 1) * core::mem::size_of::<T>() <= FUSED_SUBTREE_BYTES
+        && config.n(fused_depth + 1) <= max_subtree_len
+    {
+        fused_depth += 1;
+    }
+    let tile_len = config.n(fused_depth);
+    // These shape checks ensure that the zipped passes below initialize every slot.
+    assert!(tile_len > 0 && tile_len.is_multiple_of(base_len));
+    assert!(len.is_multiple_of(tile_len));
+    let mut buf: Vec<T> = Vec::with_capacity(len);
+    buf.spare_capacity_mut()[..len]
+        .par_chunks_mut(tile_len)
+        .zip(msg.par_chunks(tile_len / config.c))
+        .for_each_init(
+            || vec![T::ZERO; base_len],
+            |scratch, (uninitialized, message)| {
+                // BaseCode needs initialized values. Reuse one small base block
+                // instead of clearing the full output before encoding it.
+                for (out, m) in uninitialized
+                    .chunks_exact_mut(base_len)
+                    .zip(message.chunks_exact(base.k0()))
+                {
+                    base.encode_slice(m, scratch);
+                    out.write_copy_of_slice(scratch);
+                }
+                // SAFETY: the checked shapes ensure that all base blocks above
+                // cover this subtree and each slot was written. This task owns
+                // the entire disjoint subtree.
+                let subtree = unsafe { uninitialized.assume_init_mut() };
+                for level in 1..=fused_depth {
+                    let lane_len = config.n(level - 1);
+                    let diag = &diags.levels[level - 1].forward;
+                    for group in subtree.chunks_exact_mut(config.r * lane_len) {
+                        for j in 0..lane_len {
+                            let mut x = [T::ZERO; 8];
+                            for a in 0..config.r {
+                                x[a] = group[a * lane_len + j];
+                            }
+                            h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
+                            for a in 0..config.r {
+                                group[a * lane_len + j] = x[a];
+                            }
+                        }
+                    }
+                }
+            },
+        );
+    // SAFETY: all len slots were initialized before the parallel pass returned.
+    // If a task panics, buf keeps length zero. T is Copy and has no destructor.
+    unsafe { buf.set_len(len) };
     if depth == 0 {
         return RowMajorMatrix::new(buf, 1);
     }
-    for i in 1..=depth {
+    for i in fused_depth + 1..=depth {
         let np = config.n(i - 1);
         let ni = config.r * np;
         let diag = &diags.levels[i - 1].forward;
         if i == depth {
             // Only the final layout change needs a second full-size output.
-            let mut out = vec![T::ZERO; buf.len()];
-            out.par_chunks_exact_mut(config.r)
+            assert!(buf.len().is_multiple_of(config.r));
+            let mut out: Vec<T> = Vec::with_capacity(buf.len());
+            out.spare_capacity_mut()[..buf.len()]
+                .par_chunks_exact_mut(config.r)
                 .enumerate()
                 .for_each(|(j, row)| {
                     let mut x = [T::ZERO; 8];
@@ -41,8 +108,11 @@ pub fn encode_top<F: SampleBase, T: Field + Algebra<F>>(
                         x[a] = buf[a * np + j];
                     }
                     h.forward(&mut x, &diag[j * (config.r - 1)..(j + 1) * (config.r - 1)]);
-                    row.copy_from_slice(&x[..config.r]);
+                    row.write_copy_of_slice(&x[..config.r]);
                 });
+            // SAFETY: the checked exact chunks cover all buf.len() slots, and each
+            // slot was written before this pass returned. On panic out has len 0.
+            unsafe { out.set_len(buf.len()) };
             return RowMajorMatrix::new(out, config.r);
         }
         buf.par_chunks_exact_mut(ni).for_each(|group| {
@@ -220,8 +290,87 @@ mod tests {
         params::BaseCodeKind,
         sampling::{SampleBase, stream},
     };
-    use p3_field::extension::CubicTrinomialExtensionField;
+    use p3_field::{PrimeCharacteristicRing, extension::CubicTrinomialExtensionField};
     use p3_goldilocks::Goldilocks;
+
+    #[test]
+    fn depth_zero_encoding_initializes_the_complete_base_codeword() {
+        fn check<F: SampleBase, T: p3_field::ExtensionField<F>>() {
+            for backend in [BaseCodeKind::Qa, BaseCodeKind::Rs] {
+                for c in [2, 4] {
+                    let config =
+                        HyperFoldConfig::testing(F::KIND, backend, 6, 3, 2, c, T::DIMENSION)
+                            .unwrap();
+                    let base = BaseCodeImpl::<F>::new(config, &[42; 32]).unwrap();
+                    let h = LocalMatrix::new(config.r);
+                    let diags = DiagonalTables::new(config, &[42; 32]);
+                    let mut rng = stream(&[27; 32], b"base-only-encoding", 0);
+                    let message: Vec<T> = (0..base.k0())
+                        .map(|_| T::from_basis_coefficients_fn(|_| F::sample(&mut rng)))
+                        .collect();
+                    let mut expected = vec![T::ZERO; base.n0()];
+                    base.encode_slice(&message, &mut expected);
+                    let actual = encode_top(config, &base, &h, &diags, &message, 0);
+                    assert_eq!(actual.width, 1);
+                    assert_eq!(actual.values, expected);
+                }
+            }
+        }
+        check::<Goldilocks, Goldilocks>();
+        check::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>();
+        check::<Mersenne127, Mersenne127>();
+        check::<Mersenne127, M127Quad>();
+    }
+
+    #[test]
+    fn encoding_rejects_mismatched_base_shapes() {
+        let config =
+            HyperFoldConfig::testing(Goldilocks::KIND, BaseCodeKind::Qa, 10, 3, 2, 2, 3).unwrap();
+        let h = LocalMatrix::new(config.r);
+        let diags = DiagonalTables::new(config, &[42; 32]);
+        let message = vec![Goldilocks::ONE; config.k()];
+        for incompatible in [
+            HyperFoldConfig { c: 4, ..config },
+            HyperFoldConfig { mu0: 4, ..config },
+        ] {
+            let base = BaseCodeImpl::new(incompatible, &[42; 32]).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| {
+                    encode_top(config, &base, &h, &diags, &message, config.depth())
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_unwinds_when_fused_or_final_diagonals_are_truncated() {
+        let config =
+            HyperFoldConfig::testing(Goldilocks::KIND, BaseCodeKind::Qa, 10, 3, 2, 2, 3).unwrap();
+        let base = BaseCodeImpl::new(config, &[42; 32]).unwrap();
+        let h = LocalMatrix::new(config.r);
+        let message = vec![Goldilocks::ONE; config.k()];
+        for threads in [1, 4] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    for level in [0, config.depth() - 1] {
+                        let mut diags = DiagonalTables::new(config, &[42; 32]);
+                        // Permit the first coordinate, then panic after partial writes.
+                        diags.levels[level].forward.truncate(config.r - 1);
+                        assert!(
+                            std::panic::catch_unwind(|| {
+                                encode_top(config, &base, &h, &diags, &message, config.depth())
+                            })
+                            .is_err()
+                        );
+                    }
+                });
+        }
+    }
+
     #[test]
     fn recovered_first_rows_match_dense_and_only_queries_are_read() {
         use p3_field::ExtensionField;
