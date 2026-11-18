@@ -78,14 +78,6 @@ Run each configuration and version in a fresh process to avoid allocator state
 carrying over from other configurations. The filters also accept comma-separated
 lists for exploratory sweeps.
 
-The [encoding optimization measurements](results/encoding-optimization/summary.csv)
-include median speedups and raw samples in the same directory.
-[Metadata](results/encoding-optimization/metadata.json) records the baseline revision,
-build flags, CPU affinity, timing scope, and harness adaptation for the older API.
-These measurements compare `cf4b3e2` with `2bb0cc9`, before the integration of
-PR #17's fused subtrees, uninitialized buffers, and M127 packing. They do not
-measure the combined implementation.
-
 ## Results and figures
 
 Recorded 32-thread measurements (AMD EPYC 9754; timings in `ms`, `proof_bytes` in bytes) are included in `results/`:
